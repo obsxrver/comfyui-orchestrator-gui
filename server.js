@@ -9,8 +9,11 @@ const { promisify } = require("util");
 
 const PORT = Number(process.env.PORT || 4173);
 const PUBLIC_DIR = path.join(__dirname, "public");
+const MEDIA_DIR = path.join(__dirname, "media");
 const CLIENT_ID = process.env.CLIENT_ID || `orchestrator-${Math.random().toString(36).slice(2)}`;
 const execFileAsync = promisify(execFile);
+
+fs.mkdirSync(MEDIA_DIR, { recursive: true });
 
 const state = {
   backends: parseBackends(process.env.COMFY_BACKENDS || ""),
@@ -544,12 +547,6 @@ function findOutputFiles(value) {
 
 function makeOutputFile({ backend, nodeId, bucket, file }) {
   const filename = String(file.filename || "");
-  const params = new URLSearchParams({
-    filename,
-    subfolder: file.subfolder || "",
-    type: file.type || "output",
-    backendId: backend.id,
-  });
   const format = String(file.format || file.mime_type || file.content_type || "");
   const isVideo = /\.(mp4|webm)$/i.test(filename) || /^video\//i.test(format) || /video/i.test(bucket);
   return {
@@ -560,8 +557,59 @@ function makeOutputFile({ backend, nodeId, bucket, file }) {
     subfolder: file.subfolder || "",
     type: file.type || "output",
     backendId: backend.id,
-    url: `/api/view?${params.toString()}`,
+    sourceUrl: makeOutputSourceUrl(backend.id, file),
+    url: makeOutputSourceUrl(backend.id, file),
   };
+}
+
+function makeOutputSourceUrl(backendId, file) {
+  const params = new URLSearchParams({
+    filename: file.filename || "",
+    subfolder: file.subfolder || "",
+    type: file.type || "output",
+    backendId,
+  });
+  return `/api/view?${params.toString()}`;
+}
+
+function mediaUrl(filename) {
+  return `/media/${encodeURIComponent(filename)}`;
+}
+
+function localMediaName(job, output, index) {
+  const parsed = path.parse(safeFileName(output.filename || `output-${index}`));
+  const ext = parsed.ext || (output.kind === "video" ? ".mp4" : ".png");
+  const base = parsed.name || output.kind || "output";
+  return `${safeFileName(job.promptId || job.id || "job")}-${index}-${base}${ext}`;
+}
+
+async function cacheJobOutputs(job, backend) {
+  if (!job.outputs?.length || !backend) return;
+  for (let index = 0; index < job.outputs.length; index += 1) {
+    const output = job.outputs[index];
+    if (output.stored && output.localFilename) {
+      output.url = mediaUrl(output.localFilename);
+      continue;
+    }
+
+    const localFilename = output.localFilename || localMediaName(job, output, index);
+    const localPath = path.join(MEDIA_DIR, localFilename);
+    try {
+      await fs.promises.access(localPath, fs.constants.R_OK);
+    } catch {
+      const params = new URLSearchParams({
+        filename: output.filename || "",
+        subfolder: output.subfolder || "",
+        type: output.type || "output",
+      });
+      const { buffer } = await comfyFetch(backend, `/view?${params.toString()}`);
+      await fs.promises.writeFile(localPath, buffer);
+    }
+
+    output.localFilename = localFilename;
+    output.stored = true;
+    output.url = mediaUrl(localFilename);
+  }
 }
 
 function crc32(buffer) {
@@ -667,13 +715,10 @@ async function fetchVideoOutputs() {
   for (let index = 0; index < videos.length; index += 1) {
     const { job, output } = videos[index];
     const backend = getBackend(output.backendId || job.backendId);
-    if (!backend) continue;
-    const params = new URLSearchParams({
-      filename: output.filename || "",
-      subfolder: output.subfolder || "",
-      type: output.type || "output",
-    });
-    const { buffer } = await comfyFetch(backend, `/view?${params.toString()}`);
+    if (!output.stored && backend) await cacheJobOutputs(job, backend);
+    if (!output.localFilename) continue;
+    const localPath = path.join(MEDIA_DIR, output.localFilename);
+    const buffer = await fs.promises.readFile(localPath);
     entries.push({
       name: uniqueArchiveName(usedNames, output.filename, `video-${index + 1}.mp4`),
       data: buffer,
@@ -684,11 +729,19 @@ async function fetchVideoOutputs() {
 }
 
 async function refreshJob(job) {
-  if (job.status === "failed" || (job.status === "done" && job.outputs?.length)) return job;
+  if (job.status === "failed") return job;
   const backend = getBackend(job.backendId);
   if (!backend) {
     job.status = "failed";
     job.error = "Backend no longer exists";
+    return job;
+  }
+  if (job.status === "done" && job.outputs?.length) {
+    try {
+      await cacheJobOutputs(job, backend);
+    } catch (error) {
+      job.lastCacheError = error.message;
+    }
     return job;
   }
 
@@ -700,6 +753,7 @@ async function refreshJob(job) {
       job.outputs = summarizeOutputs(entry, backend);
       job.outputBuckets = summarizeOutputBuckets(entry);
       job.completedAt = new Date().toISOString();
+      await cacheJobOutputs(job, backend);
     } else {
       const queue = await getComfyJson(backend, "/queue");
       const running = queue.queue_running || [];
@@ -900,11 +954,60 @@ function serveStatic(req, res, url) {
   });
 }
 
+function serveMedia(req, res, url) {
+  const rawName = decodeURIComponent(url.pathname.replace(/^\/media\/?/, ""));
+  const fileName = path.basename(rawName);
+  const filePath = path.normalize(path.join(MEDIA_DIR, fileName));
+  if (!filePath.startsWith(MEDIA_DIR)) return sendText(res, 403, "Forbidden");
+
+  fs.stat(filePath, (error, stat) => {
+    if (error || !stat.isFile()) return sendText(res, 404, "Not found");
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = mimeTypes[ext] || "application/octet-stream";
+    const range = req.headers.range;
+
+    if (!range) {
+      res.writeHead(200, {
+        "content-type": contentType,
+        "content-length": stat.size,
+        "accept-ranges": "bytes",
+        "cache-control": "public, max-age=86400",
+      });
+      return fs.createReadStream(filePath).pipe(res);
+    }
+
+    const match = range.match(/^bytes=(\d*)-(\d*)$/);
+    if (!match) {
+      res.writeHead(416, { "content-range": `bytes */${stat.size}` });
+      return res.end();
+    }
+
+    const start = match[1] ? Number(match[1]) : 0;
+    const end = match[2] ? Number(match[2]) : stat.size - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= stat.size) {
+      res.writeHead(416, { "content-range": `bytes */${stat.size}` });
+      return res.end();
+    }
+
+    const boundedEnd = Math.min(end, stat.size - 1);
+    res.writeHead(206, {
+      "content-type": contentType,
+      "content-length": boundedEnd - start + 1,
+      "content-range": `bytes ${start}-${boundedEnd}/${stat.size}`,
+      "accept-ranges": "bytes",
+      "cache-control": "public, max-age=86400",
+    });
+    return fs.createReadStream(filePath, { start, end: boundedEnd }).pipe(res);
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
+    } else if (url.pathname.startsWith("/media/")) {
+      serveMedia(req, res, url);
     } else {
       serveStatic(req, res, url);
     }
