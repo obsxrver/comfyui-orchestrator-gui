@@ -32,6 +32,7 @@ const state = {
   sockets: new Map(),
   activePromptByBackend: new Map(),
   liveByPromptId: new Map(),
+  jobCards: new Map(),
   hideDone: false,
 };
 
@@ -82,6 +83,7 @@ function extractInputs(workflow) {
 }
 
 function makeInput({ nodeId, nodeTitle, classType, inputName, kind, value }) {
+  const primitive = primitiveDescriptor(classType, value);
   return {
     id: `${nodeId}:${inputName}`,
     nodeId,
@@ -90,9 +92,36 @@ function makeInput({ nodeId, nodeTitle, classType, inputName, kind, value }) {
     inputName,
     kind,
     value,
-    valueType: valueType(value),
+    valueType: kind === "primitive" ? primitive.valueType : valueType(value),
+    controlType: kind === "primitive" ? primitive.controlType : kind === "text" ? "multiline" : "image",
     preview: previewValue(value),
   };
+}
+
+function primitiveDescriptor(classType, value) {
+  const lower = classType.toLowerCase();
+  if (lower.includes("stringmultiline") || lower.includes("multiline")) {
+    return { valueType: "string", controlType: "multiline" };
+  }
+  if (lower.includes("boolean") || lower.includes("bool")) {
+    return { valueType: "boolean", controlType: "boolean" };
+  }
+  if (lower.includes("int")) {
+    return { valueType: "int", controlType: "int" };
+  }
+  if (lower.includes("float") || lower.includes("double")) {
+    return { valueType: "float", controlType: "float" };
+  }
+  if (lower.includes("string")) {
+    return { valueType: "string", controlType: "string" };
+  }
+  if (typeof value === "boolean") return { valueType: "boolean", controlType: "boolean" };
+  if (typeof value === "number") {
+    return Number.isInteger(value)
+      ? { valueType: "int", controlType: "int" }
+      : { valueType: "float", controlType: "float" };
+  }
+  return { valueType: valueType(value), controlType: "string" };
 }
 
 function valueType(value) {
@@ -190,6 +219,8 @@ function renderInputs() {
     const node = els.inputTemplate.content.firstElementChild.cloneNode(true);
     const toggle = node.querySelector(".vary-toggle");
     const valuesInput = node.querySelector(".values-input");
+    const scalarList = node.querySelector(".scalar-list");
+    const addScalar = node.querySelector(".add-scalar");
     const imagePicker = node.querySelector(".image-picker");
     const imageInput = node.querySelector(".image-input");
     const previewList = node.querySelector(".image-preview-list");
@@ -201,39 +232,81 @@ function renderInputs() {
 
     if (input.kind === "image") {
       valuesInput.hidden = true;
+      scalarList.hidden = true;
+      addScalar.hidden = true;
       imagePicker.hidden = false;
-      imageInput.disabled = !toggle.checked;
+      imageInput.disabled = false;
       renderFilePreview(previewList, selected?.values || []);
-    } else {
+      bindImageDrop(imagePicker, input, previewList);
+    } else if (input.controlType === "multiline") {
       imagePicker.hidden = true;
+      scalarList.hidden = true;
+      addScalar.hidden = true;
       valuesInput.hidden = false;
       valuesInput.disabled = !toggle.checked;
       valuesInput.placeholder = input.kind === "text"
         ? "One prompt per line, or separate multi-line prompts with ---"
-        : "One primitive value per line";
+        : "Separate multiline primitive variants with ---";
       valuesInput.value = selected?.rawValue || input.preview;
+    } else {
+      valuesInput.hidden = true;
+      imagePicker.hidden = true;
+      scalarList.hidden = false;
+      addScalar.hidden = false;
+      addScalar.disabled = !toggle.checked;
+      renderScalarList(scalarList, input, selected?.values || [input.value], !toggle.checked);
     }
 
     toggle.addEventListener("change", () => {
       if (toggle.checked) {
-        state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput));
+        state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
       } else {
         state.selectedInputs.delete(input.id);
+        if (input.kind === "image") renderFilePreview(previewList, []);
       }
       valuesInput.disabled = !toggle.checked;
-      imageInput.disabled = !toggle.checked;
+      imageInput.disabled = false;
+      addScalar.disabled = !toggle.checked;
+      setScalarListDisabled(scalarList, !toggle.checked);
       updateVariantCount();
       updateSubmitState();
     });
 
     valuesInput.addEventListener("input", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput));
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
       updateVariantCount();
     });
 
     imageInput.addEventListener("change", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput));
+      if (imageInput.files.length) toggle.checked = true;
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
       renderFilePreview(previewList, [...imageInput.files]);
+      updateVariantCount();
+      updateSubmitState();
+    });
+
+    scalarList.addEventListener("input", () => {
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+      updateVariantCount();
+    });
+
+    scalarList.addEventListener("change", () => {
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+      updateVariantCount();
+    });
+
+    scalarList.addEventListener("click", (event) => {
+      const removeButton = event.target.closest(".remove-scalar");
+      if (!removeButton) return;
+      removeButton.closest(".scalar-row").remove();
+      if (!scalarList.querySelector(".scalar-row")) addScalarRow(scalarList, input, input.value, !toggle.checked);
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+      updateVariantCount();
+    });
+
+    addScalar.addEventListener("click", () => {
+      addScalarRow(scalarList, input, defaultScalarValue(input), !toggle.checked);
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
       updateVariantCount();
     });
 
@@ -247,7 +320,7 @@ function labelForKind(kind) {
   return "Primitive";
 }
 
-function selectionFromControls(input, valuesInput, imageInput) {
+function selectionFromControls(input, valuesInput, imageInput, scalarList) {
   if (input.kind === "image") {
     return {
       nodeId: input.nodeId,
@@ -256,6 +329,17 @@ function selectionFromControls(input, valuesInput, imageInput) {
       valueType: "string",
       kind: "image",
       values: [...imageInput.files],
+    };
+  }
+
+  if (input.controlType !== "multiline") {
+    return {
+      nodeId: input.nodeId,
+      nodeTitle: input.nodeTitle,
+      inputName: input.inputName,
+      valueType: input.valueType,
+      kind: input.kind,
+      values: readScalarValues(scalarList, input),
     };
   }
 
@@ -268,6 +352,65 @@ function selectionFromControls(input, valuesInput, imageInput) {
     rawValue: valuesInput.value,
     values: parseTextVariants(valuesInput.value),
   };
+}
+
+function renderScalarList(container, input, values, disabled) {
+  container.innerHTML = "";
+  const safeValues = values.length ? values : [defaultScalarValue(input)];
+  for (const value of safeValues) addScalarRow(container, input, value, disabled);
+}
+
+function addScalarRow(container, input, value, disabled) {
+  const row = document.createElement("div");
+  row.className = "scalar-row";
+
+  const control = document.createElement("input");
+  control.className = "scalar-value";
+  control.disabled = disabled;
+  control.dataset.valueType = input.valueType;
+
+  if (input.controlType === "boolean") {
+    control.type = "checkbox";
+    control.checked = value === true || value === "true";
+  } else if (input.controlType === "int" || input.controlType === "float") {
+    control.type = "number";
+    control.step = input.controlType === "int" ? "1" : "any";
+    control.value = value ?? "";
+  } else {
+    control.type = "text";
+    control.value = value ?? "";
+  }
+
+  const remove = document.createElement("button");
+  remove.className = "remove-scalar icon-button";
+  remove.type = "button";
+  remove.title = "Remove value";
+  remove.textContent = "x";
+  remove.disabled = disabled;
+
+  row.append(control, remove);
+  container.append(row);
+}
+
+function setScalarListDisabled(container, disabled) {
+  for (const control of container.querySelectorAll("input, button")) control.disabled = disabled;
+}
+
+function readScalarValues(container, input) {
+  return [...container.querySelectorAll(".scalar-value")]
+    .map((control) => {
+      if (input.controlType === "boolean") return control.checked;
+      if (input.controlType === "int") return control.value === "" ? "" : Number.parseInt(control.value, 10);
+      if (input.controlType === "float") return control.value === "" ? "" : Number(control.value);
+      return control.value.trim();
+    })
+    .filter((value) => value !== "" && !(typeof value === "number" && Number.isNaN(value)));
+}
+
+function defaultScalarValue(input) {
+  if (input.controlType === "boolean") return false;
+  if (input.controlType === "int" || input.controlType === "float") return 0;
+  return "";
 }
 
 function parseTextVariants(value) {
@@ -283,20 +426,69 @@ function renderFilePreview(previewList, files) {
   previewList.innerHTML = "";
   previewList.hidden = !files.length;
   for (const file of files) {
-    const item = document.createElement("span");
-    item.className = "file-chip";
-    item.textContent = file.name;
+    const item = document.createElement("figure");
+    item.className = "image-preview";
+    const image = document.createElement("img");
+    image.alt = file.name;
+    image.src = URL.createObjectURL(file);
+    image.onload = () => URL.revokeObjectURL(image.src);
+    const caption = document.createElement("figcaption");
+    caption.textContent = file.name;
+    item.append(image, caption);
     previewList.append(item);
   }
+}
+
+function bindImageDrop(dropZone, input, previewList) {
+  if (dropZone.dataset.boundDrop === "true") return;
+  dropZone.dataset.boundDrop = "true";
+
+  for (const eventName of ["dragenter", "dragover"]) {
+    dropZone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      dropZone.classList.add("drag-over");
+    });
+  }
+
+  for (const eventName of ["dragleave", "drop"]) {
+    dropZone.addEventListener(eventName, () => dropZone.classList.remove("drag-over"));
+  }
+
+  dropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    const imageFiles = [...event.dataTransfer.files].filter((file) => file.type.startsWith("image/"));
+    if (!imageFiles.length) return;
+    const toggle = dropZone.closest(".input-row").querySelector(".vary-toggle");
+    toggle.checked = true;
+    state.selectedInputs.set(input.id, {
+      nodeId: input.nodeId,
+      nodeTitle: input.nodeTitle,
+      inputName: input.inputName,
+      valueType: "string",
+      kind: "image",
+      values: imageFiles,
+    });
+    renderFilePreview(previewList, imageFiles);
+    updateVariantCount();
+    updateSubmitState();
+  });
 }
 
 function updateVariantCount() {
   const selections = [...state.selectedInputs.values()];
   const total = selections.reduce((product, selection) => {
-    const count = selection.values.filter(Boolean).length;
+    const count = selection.values.filter(hasUiVariantValue).length;
     return product * count;
   }, selections.length ? 1 : 0);
   els.variantCount.textContent = state.workflow ? String(selections.length ? total : 1) : "0";
+}
+
+function hasUiVariantValue(value) {
+  if (value instanceof File) return true;
+  if (typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (value && typeof value === "object") return Boolean(value.dataUrl || value.name || value.value);
+  return String(value).length > 0;
 }
 
 function updateSubmitState() {
@@ -545,32 +737,79 @@ function mergeLiveJob(job) {
 function renderJobs() {
   const jobs = state.hideDone ? state.jobs.filter((job) => job.status !== "done") : state.jobs;
   updateOverallProgress();
-  els.jobList.innerHTML = "";
+  const wantedKeys = new Set(jobs.map(jobKey));
+  for (const [key, card] of state.jobCards) {
+    if (!wantedKeys.has(key)) {
+      card.remove();
+      state.jobCards.delete(key);
+    }
+  }
+
   els.jobList.classList.toggle("empty-state", !jobs.length);
   if (!jobs.length) {
+    state.jobCards.clear();
     els.jobList.textContent = "Queued outputs will appear here.";
     return;
   }
 
+  if (els.jobList.classList.contains("empty-state")) els.jobList.classList.remove("empty-state");
+  if (els.jobList.childNodes.length === 1 && els.jobList.firstChild.nodeType === Node.TEXT_NODE) {
+    els.jobList.textContent = "";
+  }
+
   for (const job of jobs) {
-    const card = document.createElement("article");
-    card.className = "job-card";
-    const statusClass = job.status === "failed" ? " failed" : "";
-    card.innerHTML = `
-      <div class="job-header">
-        <div>
-          <strong>${escapeHtml(job.backendName || "Backend")}</strong>
-          <div class="assignment">${escapeHtml(job.promptId || job.id)}</div>
-        </div>
-        <span class="pill${statusClass}">${escapeHtml(job.status)}</span>
-      </div>
-      ${renderProgress(job)}
-      ${renderAssignments(job.assignments || [])}
-      ${job.error ? `<div class="error-text">${escapeHtml(job.error)}</div>` : ""}
-      ${renderOutputs(job.outputs || [])}
-    `;
+    const key = jobKey(job);
+    let card = state.jobCards.get(key);
+    if (!card) {
+      card = createJobCard();
+      state.jobCards.set(key, card);
+    }
+    updateJobCard(card, job);
     els.jobList.append(card);
   }
+}
+
+function jobKey(job) {
+  return job.promptId || job.id;
+}
+
+function createJobCard() {
+  const card = document.createElement("article");
+  card.className = "job-card";
+  card.innerHTML = `
+    <div data-slot="header"></div>
+    <div data-slot="progress"></div>
+    <div data-slot="assignments"></div>
+    <div data-slot="error"></div>
+    <div data-slot="outputs"></div>
+  `;
+  return card;
+}
+
+function updateJobCard(card, job) {
+  const outputs = job.outputs || [];
+  const outputSignature = outputs.map((output) => `${output.kind}:${output.url}`).join("|");
+  if (card.dataset.frozen === "true" && card.dataset.outputSignature === outputSignature) return;
+
+  const statusClass = job.status === "failed" ? " failed" : "";
+  card.querySelector('[data-slot="header"]').innerHTML = `
+    <div class="job-header">
+      <div>
+        <strong>${escapeHtml(job.backendName || "Backend")}</strong>
+        <div class="assignment">${escapeHtml(job.promptId || job.id)}</div>
+      </div>
+      <span class="pill${statusClass}">${escapeHtml(job.status)}</span>
+    </div>
+  `;
+  card.querySelector('[data-slot="progress"]').innerHTML = renderProgress(job);
+  card.querySelector('[data-slot="assignments"]').innerHTML = renderAssignments(job.assignments || []);
+  card.querySelector('[data-slot="error"]').innerHTML = job.error ? `<div class="error-text">${escapeHtml(job.error)}</div>` : "";
+
+  if (card.dataset.outputSignature !== outputSignature) {
+    card.dataset.outputSignature = outputSignature;
+    card.querySelector('[data-slot="outputs"]').innerHTML = renderOutputs(outputs);
+  }
+  if (job.status === "done" && outputs.length) card.dataset.frozen = "true";
 }
 
 function updateOverallProgress() {

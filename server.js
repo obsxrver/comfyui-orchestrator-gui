@@ -171,7 +171,11 @@ async function detectCudaDevices() {
 }
 
 function coerceValue(value, valueType) {
-  if (valueType === "number") {
+  if (valueType === "int") {
+    const number = Number.parseInt(value, 10);
+    return Number.isFinite(number) ? number : value;
+  }
+  if (valueType === "float" || valueType === "number") {
     const number = Number(value);
     return Number.isFinite(number) ? number : value;
   }
