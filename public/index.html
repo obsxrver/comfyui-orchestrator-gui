@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ComfyUI Multi GPU Orchestrator</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">C</div>
+          <div>
+            <h1>ComfyUI Orchestrator</h1>
+            <p>Multi GPU workflow routing</p>
+          </div>
+        </div>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Backends</h2>
+            <button id="addBackend" class="icon-button" title="Add backend">+</button>
+          </div>
+          <div id="backendList" class="backend-list"></div>
+          <button id="saveBackends" class="primary-button">Save backends</button>
+        </section>
+
+        <section class="panel compact">
+          <div class="metric">
+            <span>Variants</span>
+            <strong id="variantCount">0</strong>
+          </div>
+          <div class="metric">
+            <span>Active jobs</span>
+            <strong id="activeCount">0</strong>
+          </div>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <label class="upload-zone">
+            <input id="workflowFile" type="file" accept=".json,application/json" />
+            <span>Upload workflow JSON</span>
+          </label>
+          <button id="submitJobs" class="primary-button" disabled>Queue variants</button>
+        </header>
+
+        <section class="editor-grid">
+          <div class="panel workflow-panel">
+            <div class="panel-heading">
+              <h2>Vary Inputs</h2>
+              <input id="inputFilter" class="filter-input" type="search" placeholder="Filter inputs" />
+            </div>
+            <div id="inputList" class="input-list empty-state">
+              Upload a ComfyUI API workflow JSON to inspect editable inputs.
+            </div>
+          </div>
+
+          <div class="panel output-panel">
+            <div class="panel-heading">
+              <h2>Scroll Player</h2>
+              <div class="player-actions">
+                <button id="refreshJobs" class="ghost-button">Refresh</button>
+                <button id="clearDone" class="ghost-button">Hide done</button>
+              </div>
+            </div>
+            <div id="jobList" class="job-list empty-state">Queued outputs will appear here.</div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <template id="backendTemplate">
+      <div class="backend-row">
+        <input class="backend-name" type="text" placeholder="GPU 1" />
+        <input class="backend-url" type="url" placeholder="http://localhost:8188" />
+        <button class="remove-backend icon-button" title="Remove backend">×</button>
+        <div class="backend-status"></div>
+      </div>
+    </template>
+
+    <template id="inputTemplate">
+      <article class="input-row">
+        <label>
+          <input class="vary-toggle" type="checkbox" />
+          <span class="input-title"></span>
+        </label>
+        <div class="input-meta"></div>
+        <textarea class="values-input" rows="3" placeholder="One value per line" disabled></textarea>
+      </article>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

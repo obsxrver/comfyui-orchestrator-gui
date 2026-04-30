@@ -1,0 +1,12 @@
+{
+  "name": "comfyui-multi-gpu-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local GUI for routing ComfyUI workflow variants across multiple GPU backends.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
