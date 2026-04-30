@@ -133,6 +133,19 @@ function makeVariantPrompt(workflow, assignments) {
   return prompt;
 }
 
+function summarizeWorkflowNodes(workflow) {
+  const labels = {};
+  for (const [nodeId, node] of Object.entries(workflow || {})) {
+    if (!node || typeof node !== "object") continue;
+    const title = node._meta?.title || node.class_type || `Node ${nodeId}`;
+    labels[nodeId] = `${title} #${nodeId}`;
+  }
+  return {
+    labels,
+    count: Object.keys(labels).length,
+  };
+}
+
 async function detectCudaDevices() {
   try {
     const { stdout } = await execFileAsync("nvidia-smi", ["-L"], { timeout: 5000 });
@@ -330,6 +343,10 @@ async function refreshJob(job) {
 }
 
 async function handleApi(req, res, url) {
+  if (url.pathname === "/api/client" && req.method === "GET") {
+    return sendJson(res, 200, { clientId: CLIENT_ID });
+  }
+
   if (url.pathname === "/api/gpus" && req.method === "GET") {
     const result = await detectCudaDevices();
     return sendJson(res, 200, result);
@@ -387,6 +404,7 @@ async function handleApi(req, res, url) {
     if (!backends.length) return sendJson(res, 400, { error: "Choose at least one configured backend." });
 
     const variants = buildVariants(workflow, selections);
+    const workflowNodes = summarizeWorkflowNodes(workflow);
     const created = [];
     for (let index = 0; index < variants.length; index += 1) {
       const backend = backends[index % backends.length];
@@ -410,6 +428,10 @@ async function handleApi(req, res, url) {
           backendName: backend.name,
           status: "queued",
           assignments: publicAssignments(preparedAssignments),
+          nodeLabels: workflowNodes.labels,
+          nodeCount: workflowNodes.count,
+          currentNode: "",
+          progress: null,
           outputs: [],
           createdAt: new Date().toISOString(),
         };

@@ -14,6 +14,8 @@ const els = {
   jobList: document.querySelector("#jobList"),
   variantCount: document.querySelector("#variantCount"),
   activeCount: document.querySelector("#activeCount"),
+  overallProgress: document.querySelector("#overallProgress"),
+  overallProgressBar: document.querySelector("#overallProgressBar"),
   backendTemplate: document.querySelector("#backendTemplate"),
   inputTemplate: document.querySelector("#inputTemplate"),
 };
@@ -26,6 +28,10 @@ const state = {
   statuses: new Map(),
   jobs: [],
   gpuDetection: null,
+  clientId: "",
+  sockets: new Map(),
+  activePromptByBackend: new Map(),
+  liveByPromptId: new Map(),
   hideDone: false,
 };
 
@@ -311,6 +317,7 @@ async function loadBackends() {
   const data = await api("/api/backends");
   state.backends = data.backends || [];
   renderBackends();
+  connectBackendSockets();
   updateSubmitState();
   refreshStatuses();
 }
@@ -323,6 +330,7 @@ async function saveBackends() {
   });
   state.backends = data.backends;
   renderBackends();
+  connectBackendSockets();
   updateSubmitState();
   refreshStatuses();
 }
@@ -351,6 +359,7 @@ async function autoCreateBackends() {
     state.gpuDetection = data.gpus;
     renderGpuSummary();
     renderBackends();
+    connectBackendSockets();
     updateSubmitState();
     refreshStatuses();
   } catch (error) {
@@ -367,9 +376,110 @@ async function refreshStatuses() {
     const data = await api("/api/backends/status");
     state.statuses = new Map((data.statuses || []).map((status) => [status.backendId, status]));
     renderBackends();
+    connectBackendSockets();
   } catch (error) {
     console.warn(error);
   }
+}
+
+async function loadClientId() {
+  const data = await api("/api/client");
+  state.clientId = data.clientId;
+  connectBackendSockets();
+}
+
+function connectBackendSockets() {
+  if (!state.clientId) return;
+  const desiredIds = new Set(state.backends.filter((backend) => backend.url).map((backend) => backend.id));
+
+  for (const [backendId, socket] of state.sockets) {
+    if (!desiredIds.has(backendId)) {
+      socket.close();
+      state.sockets.delete(backendId);
+    }
+  }
+
+  for (const backend of state.backends) {
+    if (!backend.url || state.sockets.has(backend.id)) continue;
+    try {
+      const socket = new WebSocket(`${toWebSocketBase(backend.url)}/ws?clientId=${encodeURIComponent(state.clientId)}`);
+      socket.addEventListener("message", (event) => handleComfySocketMessage(backend, event));
+      socket.addEventListener("close", () => {
+        state.sockets.delete(backend.id);
+        setTimeout(connectBackendSockets, 1500);
+      });
+      socket.addEventListener("error", () => socket.close());
+      state.sockets.set(backend.id, socket);
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+}
+
+function toWebSocketBase(rawUrl) {
+  const url = new URL(rawUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString().replace(/\/+$/, "");
+}
+
+function handleComfySocketMessage(backend, event) {
+  if (typeof event.data !== "string") return;
+  let message;
+  try {
+    message = JSON.parse(event.data);
+  } catch {
+    return;
+  }
+
+  const data = message.data || {};
+  if (message.type === "executing") {
+    const promptId = data.prompt_id;
+    if (!promptId) return;
+    if (data.node === null) {
+      updateLive(promptId, { status: "done", currentNode: "Complete", progress: { value: 1, max: 1 } });
+      loadJobs();
+      return;
+    }
+    state.activePromptByBackend.set(backend.id, promptId);
+    updateLive(promptId, {
+      status: "running",
+      backendId: backend.id,
+      currentNodeId: data.node,
+      currentNode: labelNode(promptId, data.node),
+    });
+  }
+
+  if (message.type === "progress") {
+    const promptId = data.prompt_id || state.activePromptByBackend.get(backend.id);
+    if (!promptId) return;
+    const value = Number(data.value || 0);
+    const max = Number(data.max || 0);
+    updateLive(promptId, {
+      status: "running",
+      backendId: backend.id,
+      currentNodeId: data.node || state.liveByPromptId.get(promptId)?.currentNodeId,
+      currentNode: data.node ? labelNode(promptId, data.node) : state.liveByPromptId.get(promptId)?.currentNode,
+      progress: max > 0 ? { value, max } : null,
+    });
+  }
+
+  if (message.type === "execution_error") {
+    const promptId = data.prompt_id || state.activePromptByBackend.get(backend.id);
+    if (promptId) updateLive(promptId, { status: "failed", error: data.exception_message || "Execution failed" });
+  }
+}
+
+function updateLive(promptId, patch) {
+  const previous = state.liveByPromptId.get(promptId) || {};
+  state.liveByPromptId.set(promptId, { ...previous, ...patch });
+  const job = state.jobs.find((item) => item.promptId === promptId);
+  if (job) Object.assign(job, state.liveByPromptId.get(promptId));
+  renderJobs();
+}
+
+function labelNode(promptId, nodeId) {
+  const job = state.jobs.find((item) => item.promptId === promptId);
+  return job?.nodeLabels?.[nodeId] || `Node ${nodeId}`;
 }
 
 async function serializeSelections() {
@@ -420,16 +530,21 @@ async function submitJobs() {
 async function loadJobs() {
   try {
     const data = await api("/api/jobs");
-    state.jobs = data.jobs || state.jobs;
+    state.jobs = (data.jobs || state.jobs).map(mergeLiveJob);
     renderJobs();
   } catch (error) {
     console.warn(error);
   }
 }
 
+function mergeLiveJob(job) {
+  const live = state.liveByPromptId.get(job.promptId);
+  return live ? { ...job, ...live } : job;
+}
+
 function renderJobs() {
   const jobs = state.hideDone ? state.jobs.filter((job) => job.status !== "done") : state.jobs;
-  els.activeCount.textContent = String(state.jobs.filter((job) => !["done", "failed"].includes(job.status)).length);
+  updateOverallProgress();
   els.jobList.innerHTML = "";
   els.jobList.classList.toggle("empty-state", !jobs.length);
   if (!jobs.length) {
@@ -449,12 +564,46 @@ function renderJobs() {
         </div>
         <span class="pill${statusClass}">${escapeHtml(job.status)}</span>
       </div>
+      ${renderProgress(job)}
       ${renderAssignments(job.assignments || [])}
       ${job.error ? `<div class="error-text">${escapeHtml(job.error)}</div>` : ""}
       ${renderOutputs(job.outputs || [])}
     `;
     els.jobList.append(card);
   }
+}
+
+function updateOverallProgress() {
+  const active = state.jobs.filter((job) => !["done", "failed"].includes(job.status));
+  const values = active.map(progressPercent);
+  const average = values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
+  els.activeCount.textContent = String(active.length);
+  els.overallProgress.textContent = `${average}%`;
+  els.overallProgressBar.style.width = `${average}%`;
+}
+
+function renderProgress(job) {
+  const percent = progressPercent(job);
+  const node = job.currentNode || (job.status === "done" ? "Complete" : "Waiting for backend");
+  const detail = job.progress?.max ? `Step ${job.progress.value} / ${job.progress.max}` : job.status;
+  return `
+    <div class="job-progress">
+      <div class="progress-copy">
+        <span>${escapeHtml(node)}</span>
+        <strong>${escapeHtml(detail)}</strong>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" style="width: ${percent}%"></div>
+      </div>
+    </div>
+  `;
+}
+
+function progressPercent(job) {
+  if (job.status === "done") return 100;
+  if (job.status === "failed") return 0;
+  if (!job.progress?.max) return 0;
+  return Math.max(0, Math.min(100, Math.round((job.progress.value / job.progress.max) * 100)));
 }
 
 function renderAssignments(assignments) {
@@ -514,6 +663,7 @@ els.addBackend.addEventListener("click", () => {
     url: "",
   });
   renderBackends();
+  connectBackendSockets();
 });
 els.saveBackends.addEventListener("click", saveBackends);
 els.detectGpus.addEventListener("click", detectGpus);
@@ -527,6 +677,7 @@ els.clearDone.addEventListener("click", () => {
 });
 
 loadBackends();
+loadClientId();
 detectGpus();
 loadJobs();
 setInterval(loadJobs, 3500);
