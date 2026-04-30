@@ -5,6 +5,9 @@ const els = {
   backendList: document.querySelector("#backendList"),
   addBackend: document.querySelector("#addBackend"),
   saveBackends: document.querySelector("#saveBackends"),
+  detectGpus: document.querySelector("#detectGpus"),
+  autoBackends: document.querySelector("#autoBackends"),
+  gpuSummary: document.querySelector("#gpuSummary"),
   submitJobs: document.querySelector("#submitJobs"),
   refreshJobs: document.querySelector("#refreshJobs"),
   clearDone: document.querySelector("#clearDone"),
@@ -17,16 +20,14 @@ const els = {
 
 const state = {
   workflow: null,
-  workflowName: "",
   inputs: [],
   selectedInputs: new Map(),
   backends: [],
   statuses: new Map(),
   jobs: [],
+  gpuDetection: null,
   hideDone: false,
 };
-
-const editableTypes = new Set(["string", "number", "boolean", "json"]);
 
 function api(path, options = {}) {
   return fetch(path, {
@@ -42,34 +43,62 @@ function api(path, options = {}) {
   });
 }
 
-function describeValue(value) {
-  if (value === null) return { type: "json", label: "null", preview: "null" };
-  if (Array.isArray(value)) return { type: "json", label: "array", preview: JSON.stringify(value) };
-  if (typeof value === "object") return { type: "json", label: "object", preview: JSON.stringify(value) };
-  return { type: typeof value, label: typeof value, preview: String(value) };
+function isLinkValue(value) {
+  return Array.isArray(value) && value.length === 2 && typeof value[0] === "string";
 }
 
 function extractInputs(workflow) {
   return Object.entries(workflow).flatMap(([nodeId, node]) => {
     if (!node || typeof node !== "object" || !node.inputs) return [];
-    const title = node._meta?.title || node.class_type || `Node ${nodeId}`;
-    return Object.entries(node.inputs)
-      .filter(([, value]) => !(Array.isArray(value) && value.length === 2 && typeof value[0] === "string"))
-      .map(([inputName, value]) => {
-        const description = describeValue(value);
-        return {
-          id: `${nodeId}:${inputName}`,
-          nodeId,
-          nodeTitle: title,
-          classType: node.class_type || "",
-          inputName,
-          value,
-          valueType: editableTypes.has(description.type) ? description.type : "string",
-          preview: description.preview,
-          typeLabel: description.label,
-        };
-      });
+    const classType = node.class_type || "";
+    const nodeTitle = node._meta?.title || classType || `Node ${nodeId}`;
+    const lowerClass = classType.toLowerCase();
+    const lowerTitle = nodeTitle.toLowerCase();
+
+    if (classType === "CLIPTextEncode" && typeof node.inputs.text === "string") {
+      return [makeInput({ nodeId, nodeTitle, classType, inputName: "text", kind: "text", value: node.inputs.text })];
+    }
+
+    if (classType === "LoadImage" && typeof node.inputs.image === "string") {
+      return [makeInput({ nodeId, nodeTitle, classType, inputName: "image", kind: "image", value: node.inputs.image })];
+    }
+
+    if (lowerClass.includes("primitive") || lowerTitle.includes("primitive")) {
+      return Object.entries(node.inputs)
+        .filter(([, value]) => !isLinkValue(value))
+        .map(([inputName, value]) =>
+          makeInput({ nodeId, nodeTitle, classType, inputName, kind: "primitive", value })
+        );
+    }
+
+    return [];
   });
+}
+
+function makeInput({ nodeId, nodeTitle, classType, inputName, kind, value }) {
+  return {
+    id: `${nodeId}:${inputName}`,
+    nodeId,
+    nodeTitle,
+    classType,
+    inputName,
+    kind,
+    value,
+    valueType: valueType(value),
+    preview: previewValue(value),
+  };
+}
+
+function valueType(value) {
+  if (typeof value === "number") return "number";
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "string") return "string";
+  return "json";
+}
+
+function previewValue(value) {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
 }
 
 function renderBackends() {
@@ -78,7 +107,7 @@ function renderBackends() {
     state.backends.push({
       id: `backend-${Date.now()}`,
       name: "GPU 1",
-      url: "http://localhost:8188",
+      url: "http://localhost:8189",
     });
   }
 
@@ -107,8 +136,22 @@ function summarizeBackend(status) {
   const running = queue.queue_running?.length || 0;
   const pending = queue.queue_pending?.length || 0;
   const device = status.systemStats?.devices?.[0];
-  const gpuName = device?.name ? ` · ${device.name}` : "";
-  return `Online · ${running} running · ${pending} pending${gpuName}`;
+  const gpuName = device?.name ? ` | ${device.name}` : "";
+  return `Online | ${running} running | ${pending} pending${gpuName}`;
+}
+
+function renderGpuSummary() {
+  const detection = state.gpuDetection;
+  if (!detection) {
+    els.gpuSummary.textContent = "CUDA devices not detected yet.";
+    return;
+  }
+  const count = detection.devices?.length || 0;
+  if (count) {
+    els.gpuSummary.textContent = `${count} CUDA device${count === 1 ? "" : "s"} detected.`;
+    return;
+  }
+  els.gpuSummary.textContent = detection.error ? `No CUDA devices found: ${detection.error}` : "No CUDA devices found.";
 }
 
 function collectBackendsFromDom() {
@@ -129,11 +172,11 @@ function renderInputs() {
   els.inputList.innerHTML = "";
   els.inputList.classList.toggle("empty-state", !inputs.length);
   if (!state.workflow) {
-    els.inputList.textContent = "Upload a ComfyUI API workflow JSON to inspect editable inputs.";
+    els.inputList.textContent = "Upload a ComfyUI API workflow JSON to find CLIPTextEncode, LoadImage, and primitive nodes.";
     return;
   }
   if (!inputs.length) {
-    els.inputList.textContent = "No matching inputs.";
+    els.inputList.textContent = "No CLIPTextEncode, LoadImage, or primitive inputs matched.";
     return;
   }
 
@@ -141,47 +184,113 @@ function renderInputs() {
     const node = els.inputTemplate.content.firstElementChild.cloneNode(true);
     const toggle = node.querySelector(".vary-toggle");
     const valuesInput = node.querySelector(".values-input");
+    const imagePicker = node.querySelector(".image-picker");
+    const imageInput = node.querySelector(".image-input");
+    const previewList = node.querySelector(".image-preview-list");
     const selected = state.selectedInputs.get(input.id);
+
     toggle.checked = Boolean(selected);
-    valuesInput.disabled = !toggle.checked;
-    valuesInput.value = selected?.values?.join("\n") || input.preview;
-    node.querySelector(".input-title").textContent = `${input.nodeTitle} · ${input.inputName}`;
-    node.querySelector(".input-meta").textContent = `${input.classType || "node"} #${input.nodeId} · ${input.typeLabel} · current: ${trim(input.preview, 120)}`;
+    node.querySelector(".input-title").textContent = `${labelForKind(input.kind)} - ${input.nodeTitle}`;
+    node.querySelector(".input-meta").textContent = `${input.classType} #${input.nodeId} | ${input.inputName} | current: ${trim(input.preview, 130)}`;
+
+    if (input.kind === "image") {
+      valuesInput.hidden = true;
+      imagePicker.hidden = false;
+      imageInput.disabled = !toggle.checked;
+      renderFilePreview(previewList, selected?.values || []);
+    } else {
+      imagePicker.hidden = true;
+      valuesInput.hidden = false;
+      valuesInput.disabled = !toggle.checked;
+      valuesInput.placeholder = input.kind === "text"
+        ? "One prompt per line, or separate multi-line prompts with ---"
+        : "One primitive value per line";
+      valuesInput.value = selected?.rawValue || input.preview;
+    }
+
     toggle.addEventListener("change", () => {
       if (toggle.checked) {
-        state.selectedInputs.set(input.id, inputSelection(input, valuesInput.value));
+        state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput));
       } else {
         state.selectedInputs.delete(input.id);
       }
       valuesInput.disabled = !toggle.checked;
+      imageInput.disabled = !toggle.checked;
       updateVariantCount();
       updateSubmitState();
     });
+
     valuesInput.addEventListener("input", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, inputSelection(input, valuesInput.value));
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput));
       updateVariantCount();
     });
+
+    imageInput.addEventListener("change", () => {
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput));
+      renderFilePreview(previewList, [...imageInput.files]);
+      updateVariantCount();
+    });
+
     els.inputList.append(node);
   }
 }
 
-function inputSelection(input, rawValue) {
+function labelForKind(kind) {
+  if (kind === "text") return "Prompt";
+  if (kind === "image") return "Image";
+  return "Primitive";
+}
+
+function selectionFromControls(input, valuesInput, imageInput) {
+  if (input.kind === "image") {
+    return {
+      nodeId: input.nodeId,
+      nodeTitle: input.nodeTitle,
+      inputName: input.inputName,
+      valueType: "string",
+      kind: "image",
+      values: [...imageInput.files],
+    };
+  }
+
   return {
     nodeId: input.nodeId,
     nodeTitle: input.nodeTitle,
     inputName: input.inputName,
     valueType: input.valueType,
-    values: rawValue.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+    kind: input.kind,
+    rawValue: valuesInput.value,
+    values: parseTextVariants(valuesInput.value),
   };
+}
+
+function parseTextVariants(value) {
+  const text = value.trim();
+  if (!text) return [];
+  if (/^---$/m.test(text)) {
+    return text.split(/^---$/m).map((item) => item.trim()).filter(Boolean);
+  }
+  return text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+}
+
+function renderFilePreview(previewList, files) {
+  previewList.innerHTML = "";
+  previewList.hidden = !files.length;
+  for (const file of files) {
+    const item = document.createElement("span");
+    item.className = "file-chip";
+    item.textContent = file.name;
+    previewList.append(item);
+  }
 }
 
 function updateVariantCount() {
   const selections = [...state.selectedInputs.values()];
   const total = selections.reduce((product, selection) => {
     const count = selection.values.filter(Boolean).length;
-    return product * Math.max(count, 1);
+    return product * count;
   }, selections.length ? 1 : 0);
-  els.variantCount.textContent = state.workflow ? String(Math.max(total, state.selectedInputs.size ? 0 : 1)) : "0";
+  els.variantCount.textContent = state.workflow ? String(selections.length ? total : 1) : "0";
 }
 
 function updateSubmitState() {
@@ -190,7 +299,7 @@ function updateSubmitState() {
 }
 
 function trim(value, limit) {
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+  return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
 }
 
 function selectedBackendIds() {
@@ -218,6 +327,39 @@ async function saveBackends() {
   refreshStatuses();
 }
 
+async function detectGpus() {
+  els.detectGpus.disabled = true;
+  try {
+    state.gpuDetection = await api("/api/gpus");
+    renderGpuSummary();
+  } catch (error) {
+    state.gpuDetection = { ok: false, devices: [], error: error.message };
+    renderGpuSummary();
+  } finally {
+    els.detectGpus.disabled = false;
+  }
+}
+
+async function autoCreateBackends() {
+  els.autoBackends.disabled = true;
+  try {
+    const data = await api("/api/backends/autolocal", {
+      method: "POST",
+      body: JSON.stringify({ startPort: 8189 }),
+    });
+    state.backends = data.backends || [];
+    state.gpuDetection = data.gpus;
+    renderGpuSummary();
+    renderBackends();
+    updateSubmitState();
+    refreshStatuses();
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    els.autoBackends.disabled = false;
+  }
+}
+
 async function refreshStatuses() {
   try {
     collectBackendsFromDom();
@@ -230,6 +372,28 @@ async function refreshStatuses() {
   }
 }
 
+async function serializeSelections() {
+  const selections = [];
+  for (const selection of state.selectedInputs.values()) {
+    if (selection.kind !== "image") {
+      selections.push(selection);
+      continue;
+    }
+    const values = await Promise.all(selection.values.map(readFilePayload));
+    selections.push({ ...selection, values });
+  }
+  return selections;
+}
+
+function readFilePayload(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ name: file.name, type: file.type, dataUrl: reader.result });
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 async function submitJobs() {
   els.submitJobs.disabled = true;
   els.submitJobs.textContent = "Queueing...";
@@ -238,7 +402,7 @@ async function submitJobs() {
       method: "POST",
       body: JSON.stringify({
         workflow: state.workflow,
-        selections: [...state.selectedInputs.values()],
+        selections: await serializeSelections(),
         backendIds: selectedBackendIds(),
       }),
     });
@@ -297,7 +461,7 @@ function renderAssignments(assignments) {
   if (!assignments.length) return `<div class="assignments"><span class="assignment">Original workflow</span></div>`;
   return `
     <div class="assignments">
-      ${assignments.map((item) => `<span class="assignment">${escapeHtml(item.nodeTitle)} · ${escapeHtml(item.inputName)} = ${escapeHtml(String(item.value))}</span>`).join("")}
+      ${assignments.map((item) => `<span class="assignment">${escapeHtml(item.nodeTitle)} | ${escapeHtml(item.inputName)} = ${escapeHtml(String(item.value))}</span>`).join("")}
     </div>
   `;
 }
@@ -331,7 +495,6 @@ els.workflowFile.addEventListener("change", async () => {
   const text = await file.text();
   try {
     state.workflow = JSON.parse(text);
-    state.workflowName = file.name;
     state.inputs = extractInputs(state.workflow);
     state.selectedInputs.clear();
     renderInputs();
@@ -353,6 +516,8 @@ els.addBackend.addEventListener("click", () => {
   renderBackends();
 });
 els.saveBackends.addEventListener("click", saveBackends);
+els.detectGpus.addEventListener("click", detectGpus);
+els.autoBackends.addEventListener("click", autoCreateBackends);
 els.submitJobs.addEventListener("click", submitJobs);
 els.refreshJobs.addEventListener("click", loadJobs);
 els.clearDone.addEventListener("click", () => {
@@ -362,6 +527,7 @@ els.clearDone.addEventListener("click", () => {
 });
 
 loadBackends();
+detectGpus();
 loadJobs();
 setInterval(loadJobs, 3500);
 setInterval(refreshStatuses, 10000);

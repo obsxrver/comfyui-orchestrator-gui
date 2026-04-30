@@ -2,10 +2,13 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
 
 const PORT = Number(process.env.PORT || 4173);
 const PUBLIC_DIR = path.join(__dirname, "public");
 const CLIENT_ID = process.env.CLIENT_ID || `orchestrator-${Math.random().toString(36).slice(2)}`;
+const execFileAsync = promisify(execFile);
 
 const state = {
   backends: parseBackends(process.env.COMFY_BACKENDS || ""),
@@ -71,7 +74,7 @@ function readBody(req) {
     req.setEncoding("utf8");
     req.on("data", (chunk) => {
       data += chunk;
-      if (data.length > 25 * 1024 * 1024) {
+      if (data.length > 80 * 1024 * 1024) {
         reject(new Error("Request body too large"));
         req.destroy();
       }
@@ -92,12 +95,14 @@ function getBackend(id) {
 }
 
 async function comfyFetch(backend, route, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (options.body && typeof options.body === "string" && !headers["content-type"]) {
+    headers["content-type"] = "application/json";
+  }
+
   const response = await fetch(`${backend.url}${route}`, {
     ...options,
-    headers: {
-      ...(options.body ? { "content-type": "application/json" } : {}),
-      ...(options.headers || {}),
-    },
+    headers,
   });
 
   const contentType = response.headers.get("content-type") || "";
@@ -128,6 +133,30 @@ function makeVariantPrompt(workflow, assignments) {
   return prompt;
 }
 
+async function detectCudaDevices() {
+  try {
+    const { stdout } = await execFileAsync("nvidia-smi", ["-L"], { timeout: 5000 });
+    const devices = stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const match = line.match(/^GPU\s+(\d+):\s+(.+?)(?:\s+\(UUID:\s+(.+?)\))?$/i);
+        return match
+          ? { index: Number(match[1]), name: match[2], uuid: match[3] || "" }
+          : null;
+      })
+      .filter(Boolean);
+    return { ok: true, devices };
+  } catch (error) {
+    const visible = String(process.env.CUDA_VISIBLE_DEVICES || "").trim();
+    const devices = visible
+      ? visible.split(",").map((item, index) => ({ index, name: `CUDA ${item.trim()}`, uuid: "" }))
+      : [];
+    return { ok: false, devices, error: error.message };
+  }
+}
+
 function coerceValue(value, valueType) {
   if (valueType === "number") {
     const number = Number(value);
@@ -154,12 +183,13 @@ function crossProduct(groups) {
 function buildVariants(workflow, selections) {
   const groups = selections
     .map((selection) => {
-      const values = selection.values.filter((value) => String(value).length > 0);
+      const values = selection.values.filter(hasVariantValue);
       return values.map((value) => ({
         nodeId: selection.nodeId,
         nodeTitle: selection.nodeTitle,
         inputName: selection.inputName,
         valueType: selection.valueType,
+        kind: selection.kind,
         value,
       }));
     })
@@ -170,9 +200,78 @@ function buildVariants(workflow, selections) {
   }
 
   return crossProduct(groups).map((assignments) => ({
-    prompt: makeVariantPrompt(workflow, assignments),
     assignments,
   }));
+}
+
+function hasVariantValue(value) {
+  if (value && typeof value === "object") return Boolean(value.dataUrl || value.value || value.name);
+  return String(value).length > 0;
+}
+
+async function prepareAssignments(backend, assignments) {
+  const prepared = [];
+  for (const assignment of assignments) {
+    if (assignment.kind === "image") {
+      const uploaded = await uploadInputImage(backend, assignment.value);
+      prepared.push({
+        ...assignment,
+        value: uploaded.workflowValue,
+        displayValue: assignment.value.name || uploaded.workflowValue,
+      });
+    } else {
+      prepared.push({
+        ...assignment,
+        displayValue: assignment.value,
+      });
+    }
+  }
+  return prepared;
+}
+
+async function uploadInputImage(backend, image) {
+  if (!image || !image.dataUrl) throw new Error("Image upload value is missing file data.");
+  const match = image.dataUrl.match(/^data:(.*?);base64,(.*)$/);
+  if (!match) throw new Error("Image upload value is not a base64 data URL.");
+
+  const mimeType = match[1] || image.type || "application/octet-stream";
+  const bytes = Buffer.from(match[2], "base64");
+  const fileName = safeFileName(image.name || `input-${Date.now()}.png`);
+  const form = new FormData();
+  form.append("image", new Blob([bytes], { type: mimeType }), fileName);
+  form.append("type", "input");
+  form.append("subfolder", "orchestrator");
+  form.append("overwrite", "true");
+
+  const { buffer } = await comfyFetch(backend, "/upload/image", {
+    method: "POST",
+    body: form,
+  });
+  const result = JSON.parse(buffer.toString("utf8"));
+  const name = result.name || fileName;
+  const subfolder = result.subfolder || "orchestrator";
+  return {
+    workflowValue: subfolder ? `${subfolder}/${name}` : name,
+  };
+}
+
+function safeFileName(value) {
+  return String(value).replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function publicAssignments(assignments) {
+  return assignments.map((assignment) => ({
+    nodeId: assignment.nodeId,
+    nodeTitle: assignment.nodeTitle,
+    inputName: assignment.inputName,
+    kind: assignment.kind,
+    value: assignment.displayValue ?? publicAssignmentValue(assignment.value),
+  }));
+}
+
+function publicAssignmentValue(value) {
+  if (value && typeof value === "object") return value.name || value.value || "[uploaded file]";
+  return value;
 }
 
 function summarizeOutputs(historyEntry, backend) {
@@ -231,6 +330,27 @@ async function refreshJob(job) {
 }
 
 async function handleApi(req, res, url) {
+  if (url.pathname === "/api/gpus" && req.method === "GET") {
+    const result = await detectCudaDevices();
+    return sendJson(res, 200, result);
+  }
+
+  if (url.pathname === "/api/backends/autolocal" && req.method === "POST") {
+    const body = await readJson(req);
+    const startPort = Number(body.startPort || 8189);
+    const detected = await detectCudaDevices();
+    const count = Math.max(0, Number(body.count || detected.devices.length || 0));
+    state.backends = Array.from({ length: count }, (_, index) => {
+      const device = detected.devices[index];
+      return normalizeBackend({
+        id: `backend-${index + 1}`,
+        name: device?.name ? `GPU ${index + 1}: ${device.name}` : `GPU ${index + 1}`,
+        url: `http://localhost:${startPort + index}`,
+      });
+    });
+    return sendJson(res, 200, { backends: state.backends, gpus: detected });
+  }
+
   if (url.pathname === "/api/backends" && req.method === "GET") {
     return sendJson(res, 200, { backends: state.backends });
   }
@@ -271,12 +391,13 @@ async function handleApi(req, res, url) {
     for (let index = 0; index < variants.length; index += 1) {
       const backend = backends[index % backends.length];
       const variant = variants[index];
-      const payload = {
-        prompt: variant.prompt,
-        client_id: CLIENT_ID,
-      };
 
       try {
+        const preparedAssignments = await prepareAssignments(backend, variant.assignments);
+        const payload = {
+          prompt: makeVariantPrompt(workflow, preparedAssignments),
+          client_id: CLIENT_ID,
+        };
         const { buffer } = await comfyFetch(backend, "/prompt", {
           method: "POST",
           body: JSON.stringify(payload),
@@ -288,7 +409,7 @@ async function handleApi(req, res, url) {
           backendId: backend.id,
           backendName: backend.name,
           status: "queued",
-          assignments: variant.assignments,
+          assignments: publicAssignments(preparedAssignments),
           outputs: [],
           createdAt: new Date().toISOString(),
         };
@@ -301,7 +422,7 @@ async function handleApi(req, res, url) {
           backendName: backend.name,
           status: "failed",
           error: error.message,
-          assignments: variant.assignments,
+          assignments: publicAssignments(variant.assignments),
           outputs: [],
           createdAt: new Date().toISOString(),
         };

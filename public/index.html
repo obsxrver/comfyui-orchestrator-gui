@@ -22,6 +22,11 @@
             <h2>Backends</h2>
             <button id="addBackend" class="icon-button" title="Add backend">+</button>
           </div>
+          <div class="backend-tools">
+            <button id="detectGpus" class="ghost-button">Detect CUDA</button>
+            <button id="autoBackends" class="ghost-button">Use localhost:8189+</button>
+          </div>
+          <div id="gpuSummary" class="gpu-summary">CUDA devices not detected yet.</div>
           <div id="backendList" class="backend-list"></div>
           <button id="saveBackends" class="primary-button">Save backends</button>
         </section>
@@ -50,11 +55,11 @@
         <section class="editor-grid">
           <div class="panel workflow-panel">
             <div class="panel-heading">
-              <h2>Vary Inputs</h2>
+              <h2>Workflow Inputs</h2>
               <input id="inputFilter" class="filter-input" type="search" placeholder="Filter inputs" />
             </div>
             <div id="inputList" class="input-list empty-state">
-              Upload a ComfyUI API workflow JSON to inspect editable inputs.
+              Upload a ComfyUI API workflow JSON to find CLIPTextEncode, LoadImage, and primitive nodes.
             </div>
           </div>
 
@@ -75,20 +80,25 @@
     <template id="backendTemplate">
       <div class="backend-row">
         <input class="backend-name" type="text" placeholder="GPU 1" />
-        <input class="backend-url" type="url" placeholder="http://localhost:8188" />
-        <button class="remove-backend icon-button" title="Remove backend">×</button>
+        <input class="backend-url" type="url" placeholder="http://localhost:8189" />
+        <button class="remove-backend icon-button" title="Remove backend">x</button>
         <div class="backend-status"></div>
       </div>
     </template>
 
     <template id="inputTemplate">
       <article class="input-row">
-        <label>
+        <label class="input-toggle-row">
           <input class="vary-toggle" type="checkbox" />
           <span class="input-title"></span>
         </label>
         <div class="input-meta"></div>
         <textarea class="values-input" rows="3" placeholder="One value per line" disabled></textarea>
+        <label class="image-picker">
+          <input class="image-input" type="file" accept="image/*" multiple disabled />
+          <span>Select image files</span>
+        </label>
+        <div class="image-preview-list"></div>
       </article>
     </template>
 
