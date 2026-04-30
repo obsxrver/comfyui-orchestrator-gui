@@ -739,15 +739,17 @@ function renderJobs() {
     els.jobList.textContent = "";
   }
 
+  let anchor = els.jobList.firstElementChild;
   for (const job of jobs) {
     const key = jobKey(job);
     let card = state.jobCards.get(key);
     if (!card) {
       card = createJobCard();
       state.jobCards.set(key, card);
+      els.jobList.insertBefore(card, anchor);
     }
     updateJobCard(card, job);
-    els.jobList.append(card);
+    if (card === anchor) anchor = anchor.nextElementSibling;
   }
 }
 
