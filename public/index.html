@@ -72,13 +72,32 @@
 
           <div class="panel output-panel">
             <div class="panel-heading">
-              <h2>Scroll Player</h2>
+              <h2>Outputs</h2>
               <div class="player-actions">
                 <button id="refreshJobs" class="ghost-button">Refresh</button>
-                <button id="clearDone" class="ghost-button">Hide done</button>
               </div>
             </div>
-            <div id="jobList" class="job-list empty-state">Queued outputs will appear here.</div>
+            <section class="active-section">
+              <div class="section-title">
+                <h3>In Progress</h3>
+                <span id="activeSummary">No active jobs</span>
+              </div>
+              <div id="jobList" class="job-list compact-jobs empty-state">Queued outputs will appear here.</div>
+            </section>
+
+            <section class="gallery-section">
+              <div class="section-title gallery-title">
+                <h3>Gallery</h3>
+                <div class="gallery-actions">
+                  <div class="segmented-control" aria-label="Gallery view">
+                    <button id="gridView" class="segmented-button active" type="button">Grid</button>
+                    <button id="feedView" class="segmented-button" type="button">Feed</button>
+                  </div>
+                  <button id="downloadVideos" class="ghost-button" type="button" disabled>Download videos</button>
+                </div>
+              </div>
+              <div id="mediaGallery" class="media-gallery grid-mode empty-state">Finished images and videos will appear here.</div>
+            </section>
           </div>
         </section>
       </section>

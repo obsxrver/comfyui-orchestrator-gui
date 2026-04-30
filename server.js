@@ -557,8 +557,130 @@ function makeOutputFile({ backend, nodeId, bucket, file }) {
     bucket,
     kind: isVideo ? "video" : "image",
     filename,
+    subfolder: file.subfolder || "",
+    type: file.type || "output",
+    backendId: backend.id,
     url: `/api/view?${params.toString()}`,
   };
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let index = 0; index < 8; index += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function dosDateTime(date = new Date()) {
+  const year = Math.max(1980, date.getFullYear());
+  const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
+  const dosDate = ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+  return { dosTime, dosDate };
+}
+
+function uniqueArchiveName(usedNames, filename, fallback) {
+  const parsed = path.parse(safeFileName(filename || fallback));
+  let candidate = `${parsed.name || "video"}${parsed.ext || ".mp4"}`;
+  let index = 2;
+  while (usedNames.has(candidate)) {
+    candidate = `${parsed.name || "video"}-${index}${parsed.ext || ".mp4"}`;
+    index += 1;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
+function makeZip(entries) {
+  const fileParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const data = entry.data;
+    const checksum = crc32(data);
+    const { dosTime, dosDate } = dosDateTime(entry.date);
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(dosTime, 10);
+    local.writeUInt16LE(dosDate, 12);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    fileParts.push(local, name, data);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(dosTime, 12);
+    central.writeUInt16LE(dosDate, 14);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+
+    offset += local.length + name.length + data.length;
+  }
+
+  const centralOffset = offset;
+  const centralSize = centralParts.reduce((size, part) => size + part.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(centralOffset, 16);
+  end.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...fileParts, ...centralParts, end]);
+}
+
+async function fetchVideoOutputs() {
+  const usedNames = new Set();
+  const videos = state.jobs
+    .flatMap((job) => (job.outputs || []).map((output) => ({ job, output })))
+    .filter(({ output }) => output.kind === "video");
+
+  const entries = [];
+  for (let index = 0; index < videos.length; index += 1) {
+    const { job, output } = videos[index];
+    const backend = getBackend(output.backendId || job.backendId);
+    if (!backend) continue;
+    const params = new URLSearchParams({
+      filename: output.filename || "",
+      subfolder: output.subfolder || "",
+      type: output.type || "output",
+    });
+    const { buffer } = await comfyFetch(backend, `/view?${params.toString()}`);
+    entries.push({
+      name: uniqueArchiveName(usedNames, output.filename, `video-${index + 1}.mp4`),
+      data: buffer,
+      date: job.completedAt ? new Date(job.completedAt) : new Date(),
+    });
+  }
+  return entries;
 }
 
 async function refreshJob(job) {
@@ -726,6 +848,20 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/jobs" && req.method === "GET") {
     await Promise.all(state.jobs.slice(0, 100).map(refreshJob));
     return sendJson(res, 200, { jobs: state.jobs });
+  }
+
+  if (url.pathname === "/api/videos/download" && req.method === "GET") {
+    await Promise.all(state.jobs.slice(0, 100).map(refreshJob));
+    const entries = await fetchVideoOutputs();
+    if (!entries.length) return sendText(res, 404, "No completed videos found");
+    const archive = makeZip(entries);
+    res.writeHead(200, {
+      "content-type": "application/zip",
+      "content-disposition": `attachment; filename="comfy-videos-${Date.now()}.zip"`,
+      "content-length": archive.length,
+      "cache-control": "no-store",
+    });
+    return res.end(archive);
   }
 
   if (url.pathname === "/api/view" && req.method === "GET") {

@@ -10,8 +10,12 @@ const els = {
   gpuSummary: document.querySelector("#gpuSummary"),
   submitJobs: document.querySelector("#submitJobs"),
   refreshJobs: document.querySelector("#refreshJobs"),
-  clearDone: document.querySelector("#clearDone"),
   jobList: document.querySelector("#jobList"),
+  activeSummary: document.querySelector("#activeSummary"),
+  mediaGallery: document.querySelector("#mediaGallery"),
+  gridView: document.querySelector("#gridView"),
+  feedView: document.querySelector("#feedView"),
+  downloadVideos: document.querySelector("#downloadVideos"),
   variantCount: document.querySelector("#variantCount"),
   activeCount: document.querySelector("#activeCount"),
   overallProgress: document.querySelector("#overallProgress"),
@@ -33,7 +37,11 @@ const state = {
   activePromptByBackend: new Map(),
   liveByPromptId: new Map(),
   jobCards: new Map(),
-  hideDone: false,
+  galleryView: "grid",
+  galleryItems: [],
+  activeMediaIndex: 0,
+  mediaObserver: null,
+  gallerySignature: "",
 };
 
 function api(path, options = {}) {
@@ -717,8 +725,12 @@ function mergeLiveJob(job) {
 }
 
 function renderJobs() {
-  const jobs = state.hideDone ? state.jobs.filter((job) => job.status !== "done") : state.jobs;
+  const jobs = state.jobs.filter((job) => !["done", "failed"].includes(job.status));
   updateOverallProgress();
+  renderMediaGallery();
+  els.activeSummary.textContent = jobs.length
+    ? `${jobs.length} active ${jobs.length === 1 ? "job" : "jobs"}`
+    : "No active jobs";
   const wantedKeys = new Set(jobs.map(jobKey));
   for (const [key, card] of state.jobCards) {
     if (!wantedKeys.has(key)) {
@@ -730,7 +742,7 @@ function renderJobs() {
   els.jobList.classList.toggle("empty-state", !jobs.length);
   if (!jobs.length) {
     state.jobCards.clear();
-    els.jobList.textContent = "Queued outputs will appear here.";
+    els.jobList.textContent = "Nothing is rendering right now.";
     return;
   }
 
@@ -759,21 +771,16 @@ function jobKey(job) {
 
 function createJobCard() {
   const card = document.createElement("article");
-  card.className = "job-card";
+  card.className = "job-card active-job-card";
   card.innerHTML = `
     <div data-slot="header"></div>
     <div data-slot="progress"></div>
-    <div data-slot="assignments"></div>
     <div data-slot="error"></div>
-    <div data-slot="outputs"></div>
   `;
   return card;
 }
 
 function updateJobCard(card, job) {
-  const outputs = job.outputs || [];
-  if (card.dataset.mediaMounted === "true") return;
-
   const statusClass = job.status === "failed" ? " failed" : "";
   card.querySelector('[data-slot="header"]').innerHTML = `
     <div class="job-header">
@@ -785,16 +792,7 @@ function updateJobCard(card, job) {
     </div>
   `;
   card.querySelector('[data-slot="progress"]').innerHTML = renderProgress(job);
-  card.querySelector('[data-slot="assignments"]').innerHTML = renderAssignments(job.assignments || []);
   card.querySelector('[data-slot="error"]').innerHTML = job.error ? `<div class="error-text">${escapeHtml(job.error)}</div>` : "";
-
-  const outputSlot = card.querySelector('[data-slot="outputs"]');
-  if (outputs.length) {
-    outputSlot.innerHTML = renderOutputs(outputs);
-    card.dataset.mediaMounted = "true";
-  } else if (!outputSlot.innerHTML) {
-    outputSlot.innerHTML = renderOutputs(outputs);
-  }
 }
 
 function updateOverallProgress() {
@@ -839,18 +837,98 @@ function renderAssignments(assignments) {
   `;
 }
 
-function renderOutputs(outputs) {
-  if (!outputs.length) return `<div class="assignment">Waiting for output files</div>`;
+function collectGalleryItems() {
+  return state.jobs
+    .filter((job) => job.status === "done")
+    .flatMap((job) => (job.outputs || []).map((output, index) => ({
+      ...output,
+      id: `${job.promptId || job.id}-${index}-${output.filename}`,
+      backendName: job.backendName || "Backend",
+      promptId: job.promptId || job.id,
+      completedAt: job.completedAt || job.createdAt || "",
+    })));
+}
+
+function renderMediaGallery() {
+  const items = collectGalleryItems();
+  state.galleryItems = items;
+  const signature = `${state.galleryView}:${items.map((item) => item.id).join("|")}`;
+  const videoCount = items.filter((item) => item.kind === "video").length;
+  els.downloadVideos.disabled = videoCount === 0;
+  els.downloadVideos.textContent = videoCount ? `Download ${videoCount} video${videoCount === 1 ? "" : "s"}` : "Download videos";
+  if (signature === state.gallerySignature) return;
+  state.gallerySignature = signature;
+
+  els.mediaGallery.className = `media-gallery ${state.galleryView === "feed" ? "feed-mode" : "grid-mode"}`;
+  els.mediaGallery.classList.toggle("empty-state", !items.length);
+  if (!items.length) {
+    els.mediaGallery.textContent = "Finished images and videos will appear here.";
+    return;
+  }
+
+  els.mediaGallery.innerHTML = items.map((item, index) => renderGalleryItem(item, index)).join("");
+  observeFeedVideos();
+}
+
+function renderGalleryItem(item, index) {
+  const url = escapeHtml(item.url);
+  const filename = escapeHtml(item.filename);
+  const meta = `${escapeHtml(item.backendName)} | ${escapeHtml(item.kind)}`;
+  const media = item.kind === "video"
+    ? `<video src="${url}" title="${filename}" controls loop muted playsinline preload="metadata"></video>`
+    : `<img src="${url}" alt="${filename}" loading="lazy" />`;
   return `
-    <div class="media-strip">
-      ${outputs.map((output) => {
-        const url = escapeHtml(output.url);
-        const filename = escapeHtml(output.filename);
-        if (output.kind === "video") return `<video src="${url}" title="${filename}" controls loop muted playsinline></video>`;
-        return `<img src="${url}" alt="${filename}" loading="lazy" />`;
-      }).join("")}
-    </div>
+    <figure class="gallery-item" data-media-index="${index}">
+      <div class="gallery-media">${media}</div>
+      <figcaption>
+        <strong>${filename}</strong>
+        <span>${meta}</span>
+      </figcaption>
+    </figure>
   `;
+}
+
+function setGalleryView(view) {
+  state.galleryView = view;
+  state.activeMediaIndex = 0;
+  state.gallerySignature = "";
+  els.gridView.classList.toggle("active", view === "grid");
+  els.feedView.classList.toggle("active", view === "feed");
+  renderMediaGallery();
+}
+
+function observeFeedVideos() {
+  if (state.mediaObserver) state.mediaObserver.disconnect();
+  const videos = [...els.mediaGallery.querySelectorAll("video")];
+  if (state.galleryView !== "feed" || !videos.length) {
+    videos.forEach((video) => video.pause());
+    return;
+  }
+
+  state.mediaObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const video = entry.target;
+      if (entry.isIntersecting && entry.intersectionRatio > 0.65) {
+        video.play().catch(() => {});
+      } else {
+        video.pause();
+      }
+    }
+  }, { root: els.mediaGallery, threshold: [0, 0.65, 1] });
+
+  videos.forEach((video) => state.mediaObserver.observe(video));
+}
+
+function moveFeed(step) {
+  if (state.galleryView !== "feed" || !state.galleryItems.length) return;
+  state.activeMediaIndex = Math.max(0, Math.min(state.galleryItems.length - 1, state.activeMediaIndex + step));
+  const item = els.mediaGallery.querySelector(`[data-media-index="${state.activeMediaIndex}"]`);
+  item?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function downloadAllVideos() {
+  if (!state.galleryItems.some((item) => item.kind === "video")) return;
+  window.location.href = "/api/videos/download";
 }
 
 function escapeHtml(value) {
@@ -894,10 +972,19 @@ els.detectGpus.addEventListener("click", detectGpus);
 els.autoBackends.addEventListener("click", autoCreateBackends);
 els.submitJobs.addEventListener("click", submitJobs);
 els.refreshJobs.addEventListener("click", loadJobs);
-els.clearDone.addEventListener("click", () => {
-  state.hideDone = !state.hideDone;
-  els.clearDone.textContent = state.hideDone ? "Show done" : "Hide done";
-  renderJobs();
+els.gridView.addEventListener("click", () => setGalleryView("grid"));
+els.feedView.addEventListener("click", () => setGalleryView("feed"));
+els.downloadVideos.addEventListener("click", downloadAllVideos);
+window.addEventListener("keydown", (event) => {
+  if (state.galleryView !== "feed") return;
+  if (event.key === "ArrowDown") {
+    moveFeed(1);
+    event.preventDefault();
+  }
+  if (event.key === "ArrowUp") {
+    moveFeed(-1);
+    event.preventDefault();
+  }
 });
 
 loadBackends();
