@@ -29,7 +29,7 @@ const state = {
   jobs: [],
   gpuDetection: null,
   clientId: "",
-  sockets: new Map(),
+  eventSource: null,
   activePromptByBackend: new Map(),
   liveByPromptId: new Map(),
   jobCards: new Map(),
@@ -581,48 +581,26 @@ async function loadClientId() {
 }
 
 function connectBackendSockets() {
-  if (!state.clientId) return;
-  const desiredIds = new Set(state.backends.filter((backend) => backend.url).map((backend) => backend.id));
-
-  for (const [backendId, socket] of state.sockets) {
-    if (!desiredIds.has(backendId)) {
-      socket.close();
-      state.sockets.delete(backendId);
-    }
-  }
-
-  for (const backend of state.backends) {
-    if (!backend.url || state.sockets.has(backend.id)) continue;
-    try {
-      const socket = new WebSocket(`${toWebSocketBase(backend.url)}/ws?clientId=${encodeURIComponent(state.clientId)}`);
-      socket.addEventListener("message", (event) => handleComfySocketMessage(backend, event));
-      socket.addEventListener("close", () => {
-        state.sockets.delete(backend.id);
-        setTimeout(connectBackendSockets, 1500);
-      });
-      socket.addEventListener("error", () => socket.close());
-      state.sockets.set(backend.id, socket);
-    } catch (error) {
-      console.warn(error);
-    }
-  }
+  if (state.eventSource) return;
+  const events = new EventSource("/api/events");
+  events.addEventListener("hello", (event) => {
+    const data = JSON.parse(event.data);
+    state.clientId = data.clientId || state.clientId;
+  });
+  events.addEventListener("comfy-message", (event) => {
+    const data = JSON.parse(event.data);
+    const backend = state.backends.find((item) => item.id === data.backendId) || { id: data.backendId };
+    handleComfySocketMessage(backend, data.message);
+  });
+  events.onerror = () => {
+    events.close();
+    state.eventSource = null;
+    setTimeout(connectBackendSockets, 3000);
+  };
+  state.eventSource = events;
 }
 
-function toWebSocketBase(rawUrl) {
-  const url = new URL(rawUrl);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString().replace(/\/+$/, "");
-}
-
-function handleComfySocketMessage(backend, event) {
-  if (typeof event.data !== "string") return;
-  let message;
-  try {
-    message = JSON.parse(event.data);
-  } catch {
-    return;
-  }
-
+function handleComfySocketMessage(backend, message) {
   const data = message.data || {};
   if (message.type === "executing") {
     const promptId = data.prompt_id;

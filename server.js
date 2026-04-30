@@ -1,4 +1,6 @@
 const http = require("http");
+const https = require("https");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
@@ -13,6 +15,9 @@ const execFileAsync = promisify(execFile);
 const state = {
   backends: parseBackends(process.env.COMFY_BACKENDS || ""),
   jobs: [],
+  eventClients: new Set(),
+  comfySockets: new Map(),
+  activePromptByBackend: new Map(),
 };
 
 const mimeTypes = {
@@ -68,6 +73,15 @@ function sendText(res, status, text) {
   res.end(text);
 }
 
+function sendEvent(res, event, payload) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function broadcastEvent(event, payload) {
+  for (const client of state.eventClients) sendEvent(client, event, payload);
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -121,6 +135,39 @@ async function comfyFetch(backend, route, options = {}) {
 async function getComfyJson(backend, route) {
   const { buffer } = await comfyFetch(backend, route);
   return JSON.parse(buffer.toString("utf8"));
+}
+
+function queueLoad(queue) {
+  return (queue.queue_running || []).length + (queue.queue_pending || []).length;
+}
+
+async function getBackendLoads(backends) {
+  const loads = new Map();
+  await Promise.all(
+    backends.map(async (backend) => {
+      try {
+        const queue = await getComfyJson(backend, "/queue");
+        loads.set(backend.id, queueLoad(queue));
+      } catch {
+        loads.set(backend.id, Number.MAX_SAFE_INTEGER);
+      }
+    })
+  );
+  return loads;
+}
+
+function chooseLeastBusyBackend(backends, loads) {
+  let best = backends[0];
+  let bestLoad = loads.get(best.id) ?? 0;
+  for (const backend of backends.slice(1)) {
+    const load = loads.get(backend.id) ?? 0;
+    if (load < bestLoad) {
+      best = backend;
+      bestLoad = load;
+    }
+  }
+  loads.set(best.id, bestLoad + 1);
+  return best;
 }
 
 function makeVariantPrompt(workflow, assignments) {
@@ -291,6 +338,173 @@ function publicAssignmentValue(value) {
   return value;
 }
 
+function syncComfySockets() {
+  const backendIds = new Set(state.backends.map((backend) => backend.id));
+  for (const [backendId, connection] of state.comfySockets) {
+    if (!backendIds.has(backendId)) closeComfySocket(backendId, connection);
+  }
+  for (const backend of state.backends) {
+    const existing = state.comfySockets.get(backend.id);
+    if (!existing || existing.closed) connectComfySocket(backend);
+  }
+}
+
+function closeComfySocket(backendId, connection) {
+  connection.closed = true;
+  if (connection.retryTimer) clearTimeout(connection.retryTimer);
+  if (connection.request) connection.request.destroy();
+  if (connection.socket) connection.socket.destroy();
+  state.comfySockets.delete(backendId);
+}
+
+function connectComfySocket(backend) {
+  if (!backend.url) return;
+  const backendUrl = new URL(backend.url);
+  const isSecure = backendUrl.protocol === "https:";
+  const key = crypto.randomBytes(16).toString("base64");
+  const connection = { backendId: backend.id, closed: false, request: null, socket: null, retryTimer: null };
+  state.comfySockets.set(backend.id, connection);
+
+  const request = (isSecure ? https : http).request({
+    protocol: backendUrl.protocol,
+    hostname: backendUrl.hostname,
+    port: backendUrl.port || (isSecure ? 443 : 80),
+    path: `/ws?clientId=${encodeURIComponent(CLIENT_ID)}`,
+    method: "GET",
+    headers: {
+      Host: backendUrl.host,
+      Origin: backend.url,
+      Upgrade: "websocket",
+      Connection: "Upgrade",
+      "Sec-WebSocket-Key": key,
+      "Sec-WebSocket-Version": "13",
+    },
+  });
+
+  connection.request = request;
+  request.on("upgrade", (_response, socket, head) => {
+    connection.socket = socket;
+    let buffer = head && head.length ? head : Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      try {
+        buffer = Buffer.concat([buffer, chunk]);
+        buffer = consumeWebSocketFrames(buffer, socket, (message) => handleComfySocketMessage(backend, message));
+      } catch {
+        socket.destroy();
+      }
+    });
+    socket.on("close", () => scheduleComfyReconnect(backend, connection));
+    socket.on("error", () => scheduleComfyReconnect(backend, connection));
+  });
+  request.on("response", (response) => {
+    response.resume();
+    scheduleComfyReconnect(backend, connection);
+  });
+  request.on("error", () => scheduleComfyReconnect(backend, connection));
+  request.end();
+}
+
+function scheduleComfyReconnect(backend, connection) {
+  if (connection.closed) return;
+  if (connection.retryTimer) return;
+  connection.retryTimer = setTimeout(() => {
+    state.comfySockets.delete(backend.id);
+    syncComfySockets();
+  }, 10000);
+}
+
+function consumeWebSocketFrames(buffer, socket, onText) {
+  let offset = 0;
+  while (buffer.length - offset >= 2) {
+    const first = buffer[offset];
+    const second = buffer[offset + 1];
+    const opcode = first & 0x0f;
+    const masked = Boolean(second & 0x80);
+    let length = second & 0x7f;
+    let headerLength = 2;
+    if (length === 126) {
+      if (buffer.length - offset < 4) break;
+      length = buffer.readUInt16BE(offset + 2);
+      headerLength = 4;
+    } else if (length === 127) {
+      if (buffer.length - offset < 10) break;
+      const bigLength = buffer.readBigUInt64BE(offset + 2);
+      if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("WebSocket frame too large");
+      length = Number(bigLength);
+      headerLength = 10;
+    }
+    const maskLength = masked ? 4 : 0;
+    const frameLength = headerLength + maskLength + length;
+    if (buffer.length - offset < frameLength) break;
+
+    let payload = buffer.subarray(offset + headerLength + maskLength, offset + frameLength);
+    if (masked) {
+      const mask = buffer.subarray(offset + headerLength, offset + headerLength + 4);
+      payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
+    }
+    if (opcode === 1) onText(payload.toString("utf8"));
+    if (opcode === 8) socket.destroy();
+    if (opcode === 9) sendWebSocketFrame(socket, 10, payload);
+    offset += frameLength;
+  }
+  return buffer.subarray(offset);
+}
+
+function sendWebSocketFrame(socket, opcode, payload) {
+  const data = Buffer.isBuffer(payload) ? payload : Buffer.from(payload || "");
+  const mask = crypto.randomBytes(4);
+  const header = data.length < 126
+    ? Buffer.from([0x80 | opcode, 0x80 | data.length])
+    : Buffer.from([0x80 | opcode, 0x80 | 126, data.length >> 8, data.length & 0xff]);
+  const masked = Buffer.from(data.map((byte, index) => byte ^ mask[index % 4]));
+  socket.write(Buffer.concat([header, mask, masked]));
+}
+
+function handleComfySocketMessage(backend, rawMessage) {
+  let message;
+  try {
+    message = JSON.parse(rawMessage);
+  } catch {
+    return;
+  }
+  const data = message.data || {};
+  if (message.type === "executing" && data.prompt_id) {
+    if (data.node === null) {
+      updateJobLive(data.prompt_id, { status: "done", currentNode: "Complete", progress: { value: 1, max: 1 } });
+    } else {
+      state.activePromptByBackend.set(backend.id, data.prompt_id);
+      updateJobLive(data.prompt_id, {
+        status: "running",
+        currentNodeId: data.node,
+        currentNode: null,
+      });
+    }
+  }
+  if (message.type === "progress") {
+    const promptId = data.prompt_id || state.activePromptByBackend.get(backend.id);
+    if (promptId) {
+      updateJobLive(promptId, {
+        status: "running",
+        currentNodeId: data.node,
+        progress: Number(data.max) > 0 ? { value: Number(data.value || 0), max: Number(data.max) } : null,
+      });
+    }
+  }
+  if (message.type === "execution_error") {
+    const promptId = data.prompt_id || state.activePromptByBackend.get(backend.id);
+    if (promptId) updateJobLive(promptId, { status: "failed", error: data.exception_message || "Execution failed" });
+  }
+  broadcastEvent("comfy-message", { backendId: backend.id, message });
+}
+
+function updateJobLive(promptId, patch) {
+  const job = state.jobs.find((item) => item.promptId === promptId);
+  if (!job) return;
+  const nodeId = patch.currentNodeId || job.currentNodeId;
+  Object.assign(job, patch);
+  if (nodeId && job.nodeLabels) job.currentNode = job.nodeLabels[nodeId] || `Node ${nodeId}`;
+}
+
 function summarizeOutputs(historyEntry, backend) {
   const outputs = [];
   const nodeOutputs = historyEntry?.outputs || {};
@@ -347,6 +561,19 @@ async function refreshJob(job) {
 }
 
 async function handleApi(req, res, url) {
+  if (url.pathname === "/api/events" && req.method === "GET") {
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+    });
+    sendEvent(res, "hello", { clientId: CLIENT_ID });
+    state.eventClients.add(res);
+    syncComfySockets();
+    req.on("close", () => state.eventClients.delete(res));
+    return;
+  }
+
   if (url.pathname === "/api/client" && req.method === "GET") {
     return sendJson(res, 200, { clientId: CLIENT_ID });
   }
@@ -369,16 +596,19 @@ async function handleApi(req, res, url) {
         url: `http://localhost:${startPort + index}`,
       });
     });
+    syncComfySockets();
     return sendJson(res, 200, { backends: state.backends, gpus: detected });
   }
 
   if (url.pathname === "/api/backends" && req.method === "GET") {
+    syncComfySockets();
     return sendJson(res, 200, { backends: state.backends });
   }
 
   if (url.pathname === "/api/backends" && req.method === "POST") {
     const body = await readJson(req);
     state.backends = (body.backends || []).map(normalizeBackend).filter((backend) => backend.url);
+    syncComfySockets();
     return sendJson(res, 200, { backends: state.backends });
   }
 
@@ -409,9 +639,10 @@ async function handleApi(req, res, url) {
 
     const variants = buildVariants(workflow, selections);
     const workflowNodes = summarizeWorkflowNodes(workflow);
+    const backendLoads = await getBackendLoads(backends);
     const created = [];
     for (let index = 0; index < variants.length; index += 1) {
-      const backend = backends[index % backends.length];
+      const backend = chooseLeastBusyBackend(backends, backendLoads);
       const variant = variants[index];
 
       try {
