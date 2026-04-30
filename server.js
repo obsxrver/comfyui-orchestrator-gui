@@ -470,7 +470,7 @@ function handleComfySocketMessage(backend, rawMessage) {
   const data = message.data || {};
   if (message.type === "executing" && data.prompt_id) {
     if (data.node === null) {
-      updateJobLive(data.prompt_id, { status: "done", currentNode: "Complete", progress: { value: 1, max: 1 } });
+      updateJobLive(data.prompt_id, { status: "finishing", currentNode: "Fetching outputs", progress: { value: 1, max: 1 } });
     } else {
       state.activePromptByBackend.set(backend.id, data.prompt_id);
       updateJobLive(data.prompt_id, {
@@ -517,7 +517,7 @@ function summarizeOutputs(historyEntry, backend) {
           type: file.type || "output",
           backendId: backend.id,
         });
-        const isVideo = /\.(mp4|webm|mov|mkv)$/i.test(file.filename) || kind === "gifs";
+        const isVideo = /\.(mp4|webm)$/i.test(file.filename);
         outputs.push({
           nodeId,
           kind: isVideo ? "video" : "image",
@@ -531,7 +531,7 @@ function summarizeOutputs(historyEntry, backend) {
 }
 
 async function refreshJob(job) {
-  if (job.status === "failed" || job.status === "done") return job;
+  if (job.status === "failed" || (job.status === "done" && job.outputs?.length)) return job;
   const backend = getBackend(job.backendId);
   if (!backend) {
     job.status = "failed";

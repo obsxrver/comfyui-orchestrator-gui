@@ -606,7 +606,7 @@ function handleComfySocketMessage(backend, message) {
     const promptId = data.prompt_id;
     if (!promptId) return;
     if (data.node === null) {
-      updateLive(promptId, { status: "done", currentNode: "Complete", progress: { value: 1, max: 1 } });
+      updateLive(promptId, { status: "finishing", currentNode: "Fetching outputs", progress: { value: 1, max: 1 } });
       loadJobs();
       return;
     }
@@ -708,6 +708,10 @@ async function loadJobs() {
 }
 
 function mergeLiveJob(job) {
+  if (job.status === "done" && job.outputs?.length) {
+    state.liveByPromptId.delete(job.promptId);
+    return job;
+  }
   const live = state.liveByPromptId.get(job.promptId);
   return live ? { ...job, ...live } : job;
 }
@@ -766,8 +770,7 @@ function createJobCard() {
 
 function updateJobCard(card, job) {
   const outputs = job.outputs || [];
-  const outputSignature = outputs.map((output) => `${output.kind}:${output.url}`).join("|");
-  if (card.dataset.frozen === "true" && card.dataset.outputSignature === outputSignature) return;
+  if (card.dataset.mediaMounted === "true") return;
 
   const statusClass = job.status === "failed" ? " failed" : "";
   card.querySelector('[data-slot="header"]').innerHTML = `
@@ -783,11 +786,13 @@ function updateJobCard(card, job) {
   card.querySelector('[data-slot="assignments"]').innerHTML = renderAssignments(job.assignments || []);
   card.querySelector('[data-slot="error"]').innerHTML = job.error ? `<div class="error-text">${escapeHtml(job.error)}</div>` : "";
 
-  if (card.dataset.outputSignature !== outputSignature) {
-    card.dataset.outputSignature = outputSignature;
-    card.querySelector('[data-slot="outputs"]').innerHTML = renderOutputs(outputs);
+  const outputSlot = card.querySelector('[data-slot="outputs"]');
+  if (outputs.length) {
+    outputSlot.innerHTML = renderOutputs(outputs);
+    card.dataset.mediaMounted = "true";
+  } else if (!outputSlot.innerHTML) {
+    outputSlot.innerHTML = renderOutputs(outputs);
   }
-  if (job.status === "done" && outputs.length) card.dataset.frozen = "true";
 }
 
 function updateOverallProgress() {
