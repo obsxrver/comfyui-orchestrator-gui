@@ -509,25 +509,56 @@ function summarizeOutputs(historyEntry, backend) {
   const outputs = [];
   const nodeOutputs = historyEntry?.outputs || {};
   for (const [nodeId, output] of Object.entries(nodeOutputs)) {
-    for (const kind of ["images", "gifs"]) {
-      for (const file of output[kind] || []) {
-        const params = new URLSearchParams({
-          filename: file.filename,
-          subfolder: file.subfolder || "",
-          type: file.type || "output",
-          backendId: backend.id,
-        });
-        const isVideo = /\.(mp4|webm)$/i.test(file.filename);
-        outputs.push({
-          nodeId,
-          kind: isVideo ? "video" : "image",
-          filename: file.filename,
-          url: `/api/view?${params.toString()}`,
-        });
+    for (const [bucket, value] of Object.entries(output || {})) {
+      for (const file of findOutputFiles(value)) {
+        outputs.push(makeOutputFile({ backend, nodeId, bucket, file }));
       }
     }
   }
   return outputs;
+}
+
+function summarizeOutputBuckets(historyEntry) {
+  const nodeOutputs = historyEntry?.outputs || {};
+  const summary = {};
+  for (const [nodeId, output] of Object.entries(nodeOutputs)) {
+    summary[nodeId] = Object.keys(output || {});
+  }
+  return summary;
+}
+
+function findOutputFiles(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      if (item && typeof item === "object" && item.filename) return [item];
+      return findOutputFiles(item);
+    });
+  }
+  if (typeof value === "object") {
+    if (value.filename) return [value];
+    return Object.values(value).flatMap(findOutputFiles);
+  }
+  return [];
+}
+
+function makeOutputFile({ backend, nodeId, bucket, file }) {
+  const filename = String(file.filename || "");
+  const params = new URLSearchParams({
+    filename,
+    subfolder: file.subfolder || "",
+    type: file.type || "output",
+    backendId: backend.id,
+  });
+  const format = String(file.format || file.mime_type || file.content_type || "");
+  const isVideo = /\.(mp4|webm)$/i.test(filename) || /^video\//i.test(format) || /video/i.test(bucket);
+  return {
+    nodeId,
+    bucket,
+    kind: isVideo ? "video" : "image",
+    filename,
+    url: `/api/view?${params.toString()}`,
+  };
 }
 
 async function refreshJob(job) {
@@ -545,6 +576,7 @@ async function refreshJob(job) {
     if (entry) {
       job.status = "done";
       job.outputs = summarizeOutputs(entry, backend);
+      job.outputBuckets = summarizeOutputBuckets(entry);
       job.completedAt = new Date().toISOString();
     } else {
       const queue = await getComfyJson(backend, "/queue");
