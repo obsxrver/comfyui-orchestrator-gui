@@ -8,6 +8,7 @@ const { execFile } = require("child_process");
 const { promisify } = require("util");
 
 const PORT = Number(process.env.PORT || 4173);
+const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const MEDIA_DIR = path.join(__dirname, "media");
 const CLIENT_ID = process.env.CLIENT_ID || `orchestrator-${Math.random().toString(36).slice(2)}`;
@@ -36,6 +37,16 @@ const mimeTypes = {
   ".gif": "image/gif",
   ".mp4": "video/mp4",
   ".webm": "video/webm",
+};
+
+const mediaKinds = {
+  ".png": "image",
+  ".jpg": "image",
+  ".jpeg": "image",
+  ".webp": "image",
+  ".gif": "image",
+  ".mp4": "video",
+  ".webm": "video",
 };
 
 function parseBackends(value) {
@@ -576,6 +587,29 @@ function mediaUrl(filename) {
   return `/media/${encodeURIComponent(filename)}`;
 }
 
+async function listMediaFiles(kindFilter = "") {
+  const names = await fs.promises.readdir(MEDIA_DIR);
+  const items = await Promise.all(names.map(async (filename) => {
+    const ext = path.extname(filename).toLowerCase();
+    const kind = mediaKinds[ext];
+    if (!kind || (kindFilter && kind !== kindFilter)) return null;
+    const filePath = path.join(MEDIA_DIR, filename);
+    const stat = await fs.promises.stat(filePath).catch(() => null);
+    if (!stat?.isFile()) return null;
+    return {
+      id: `${filename}-${stat.mtimeMs}-${stat.size}`,
+      kind,
+      filename,
+      url: mediaUrl(filename),
+      backendName: "Media directory",
+      completedAt: stat.mtime.toISOString(),
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+    };
+  }));
+  return items.filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename));
+}
+
 function localMediaName(job, output, index) {
   const parsed = path.parse(safeFileName(output.filename || `output-${index}`));
   const ext = parsed.ext || (output.kind === "video" ? ".mp4" : ".png");
@@ -707,22 +741,16 @@ function makeZip(entries) {
 
 async function fetchVideoOutputs() {
   const usedNames = new Set();
-  const videos = state.jobs
-    .flatMap((job) => (job.outputs || []).map((output) => ({ job, output })))
-    .filter(({ output }) => output.kind === "video");
-
+  const videos = await listMediaFiles("video");
   const entries = [];
   for (let index = 0; index < videos.length; index += 1) {
-    const { job, output } = videos[index];
-    const backend = getBackend(output.backendId || job.backendId);
-    if (!output.stored && backend) await cacheJobOutputs(job, backend);
-    if (!output.localFilename) continue;
-    const localPath = path.join(MEDIA_DIR, output.localFilename);
+    const video = videos[index];
+    const localPath = path.join(MEDIA_DIR, video.filename);
     const buffer = await fs.promises.readFile(localPath);
     entries.push({
-      name: uniqueArchiveName(usedNames, output.filename, `video-${index + 1}.mp4`),
+      name: uniqueArchiveName(usedNames, video.filename, `video-${index + 1}.mp4`),
       data: buffer,
-      date: job.completedAt ? new Date(job.completedAt) : new Date(),
+      date: video.completedAt ? new Date(video.completedAt) : new Date(),
     });
   }
   return entries;
@@ -848,9 +876,10 @@ async function handleApi(req, res, url) {
     const variants = buildVariants(workflow, selections);
     const workflowNodes = summarizeWorkflowNodes(workflow);
     const backendLoads = await getBackendLoads(backends);
+    const selectedBackend = chooseLeastBusyBackend(backends, backendLoads);
     const created = [];
     for (let index = 0; index < variants.length; index += 1) {
-      const backend = chooseLeastBusyBackend(backends, backendLoads);
+      const backend = selectedBackend;
       const variant = variants[index];
 
       try {
@@ -904,10 +933,22 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { jobs: state.jobs });
   }
 
+  if (url.pathname === "/api/media" && req.method === "GET") {
+    const limit = Math.max(1, Math.min(120, Number(url.searchParams.get("limit")) || 36));
+    const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+    const items = await listMediaFiles();
+    return sendJson(res, 200, {
+      items: items.slice(offset, offset + limit),
+      total: items.length,
+      offset,
+      limit,
+      hasMore: offset + limit < items.length,
+    });
+  }
+
   if (url.pathname === "/api/videos/download" && req.method === "GET") {
-    await Promise.all(state.jobs.slice(0, 100).map(refreshJob));
     const entries = await fetchVideoOutputs();
-    if (!entries.length) return sendText(res, 404, "No completed videos found");
+    if (!entries.length) return sendText(res, 404, "No videos found in media directory");
     const archive = makeZip(entries);
     res.writeHead(200, {
       "content-type": "application/zip",
@@ -1016,6 +1057,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`ComfyUI orchestrator running at http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`ComfyUI orchestrator running at http://${HOST}:${PORT}`);
+  console.log(`Local access: http://localhost:${PORT}`);
 });

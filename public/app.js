@@ -2,6 +2,7 @@ const els = {
   workflowFile: document.querySelector("#workflowFile"),
   inputList: document.querySelector("#inputList"),
   inputFilter: document.querySelector("#inputFilter"),
+  showHiddenInputs: document.querySelector("#showHiddenInputs"),
   backendList: document.querySelector("#backendList"),
   addBackend: document.querySelector("#addBackend"),
   saveBackends: document.querySelector("#saveBackends"),
@@ -15,7 +16,10 @@ const els = {
   mediaGallery: document.querySelector("#mediaGallery"),
   gridView: document.querySelector("#gridView"),
   feedView: document.querySelector("#feedView"),
+  autoScrollNew: document.querySelector("#autoScrollNew"),
   downloadVideos: document.querySelector("#downloadVideos"),
+  galleryCount: document.querySelector("#galleryCount"),
+  loadMoreMedia: document.querySelector("#loadMoreMedia"),
   variantCount: document.querySelector("#variantCount"),
   activeCount: document.querySelector("#activeCount"),
   overallProgress: document.querySelector("#overallProgress"),
@@ -28,6 +32,7 @@ const state = {
   workflow: null,
   inputs: [],
   selectedInputs: new Map(),
+  hiddenInputIds: new Set(),
   backends: [],
   statuses: new Map(),
   jobs: [],
@@ -37,11 +42,22 @@ const state = {
   activePromptByBackend: new Map(),
   liveByPromptId: new Map(),
   jobCards: new Map(),
+  mediaItems: [],
+  mediaPage: {
+    limit: 36,
+    offset: 0,
+    total: 0,
+    hasMore: false,
+    loading: false,
+  },
   galleryView: "grid",
   galleryItems: [],
   activeMediaIndex: 0,
   mediaObserver: null,
+  galleryScrollObserver: null,
   gallerySignature: "",
+  autoScrollNew: localStorage.getItem("autoScrollNewMedia") !== "false",
+  feedLooping: false,
 };
 
 function api(path, options = {}) {
@@ -205,12 +221,37 @@ function collectBackendsFromDom() {
   }));
 }
 
+function nextLocalBackendUrl(backends) {
+  const localhostPorts = backends
+    .map((backend) => {
+      try {
+        const url = new URL(backend.url);
+        const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+        return isLocalhost ? Number(url.port) : 0;
+      } catch {
+        return 0;
+      }
+    })
+    .filter((port) => Number.isInteger(port) && port > 0);
+
+  if (localhostPorts.length) {
+    return `http://localhost:${Math.max(...localhostPorts) + 1}`;
+  }
+
+  return `http://localhost:${8189 + backends.length}`;
+}
+
 function renderInputs() {
   const filter = els.inputFilter.value.trim().toLowerCase();
-  const inputs = state.inputs.filter((input) => {
+  const visibleInputs = state.inputs.filter((input) => !state.hiddenInputIds.has(input.id));
+  const inputs = visibleInputs.filter((input) => {
     const haystack = `${input.nodeTitle} ${input.classType} ${input.inputName} ${input.preview}`.toLowerCase();
     return haystack.includes(filter);
   });
+  els.showHiddenInputs.hidden = state.hiddenInputIds.size === 0;
+  els.showHiddenInputs.textContent = state.hiddenInputIds.size
+    ? `Unhide all (${state.hiddenInputIds.size})`
+    : "Unhide all";
 
   els.inputList.innerHTML = "";
   els.inputList.classList.toggle("empty-state", !inputs.length);
@@ -219,7 +260,9 @@ function renderInputs() {
     return;
   }
   if (!inputs.length) {
-    els.inputList.textContent = "No CLIPTextEncode, LoadImage, or primitive inputs matched.";
+    els.inputList.textContent = visibleInputs.length
+      ? "No CLIPTextEncode, LoadImage, or primitive inputs matched."
+      : "All workflow inputs are hidden.";
     return;
   }
 
@@ -232,6 +275,7 @@ function renderInputs() {
     const imagePicker = node.querySelector(".image-picker");
     const imageInput = node.querySelector(".image-input");
     const previewList = node.querySelector(".image-preview-list");
+    const hideInput = node.querySelector(".hide-input");
     const selected = state.selectedInputs.get(input.id);
 
     toggle.checked = Boolean(selected);
@@ -316,6 +360,14 @@ function renderInputs() {
       addScalarRow(scalarList, input, defaultScalarValue(input), !toggle.checked);
       if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
       updateVariantCount();
+    });
+
+    hideInput.addEventListener("click", () => {
+      state.hiddenInputIds.add(input.id);
+      state.selectedInputs.delete(input.id);
+      renderInputs();
+      updateVariantCount();
+      updateSubmitState();
     });
 
     els.inputList.append(node);
@@ -427,7 +479,7 @@ function parseTextVariants(value) {
   if (/^---$/m.test(text)) {
     return text.split(/^---$/m).map((item) => item.trim()).filter(Boolean);
   }
-  return text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  return [text];
 }
 
 function renderFilePreview(previewList, files) {
@@ -673,6 +725,18 @@ async function serializeSelections() {
   return selections;
 }
 
+async function syncBackendsForSubmit() {
+  collectBackendsFromDom();
+  const data = await api("/api/backends", {
+    method: "POST",
+    body: JSON.stringify({ backends: state.backends }),
+  });
+  state.backends = data.backends || [];
+  renderBackends();
+  connectBackendSockets();
+  return state.backends.filter((backend) => backend.url).map((backend) => backend.id);
+}
+
 function readFilePayload(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -691,7 +755,7 @@ async function submitJobs() {
       body: JSON.stringify({
         workflow: state.workflow,
         selections: await serializeSelections(),
-        backendIds: selectedBackendIds(),
+        backendIds: await syncBackendsForSubmit(),
       }),
     });
     state.jobs = [...data.jobs, ...state.jobs];
@@ -707,12 +771,61 @@ async function submitJobs() {
 
 async function loadJobs() {
   try {
-    const data = await api("/api/jobs");
-    state.jobs = (data.jobs || state.jobs).map(mergeLiveJob);
+    const [jobsData] = await Promise.all([
+      api("/api/jobs"),
+      loadMediaPage({ reset: true }),
+    ]);
+    state.jobs = (jobsData.jobs || state.jobs).map(mergeLiveJob);
     renderJobs();
   } catch (error) {
     console.warn(error);
   }
+}
+
+async function loadMediaPage({ reset = false } = {}) {
+  if (state.mediaPage.loading) return;
+  state.mediaPage.loading = true;
+  renderGalleryFooter();
+  const previousFirstId = state.mediaItems[0]?.id || "";
+  const previousScrollHeight = els.mediaGallery.scrollHeight;
+  const previousScrollTop = els.mediaGallery.scrollTop;
+
+  try {
+    const offset = reset ? 0 : state.mediaItems.length;
+    const limit = reset ? Math.max(state.mediaPage.limit, state.mediaItems.length || 0) : state.mediaPage.limit;
+    const data = await api(`/api/media?limit=${limit}&offset=${offset}`);
+    const incoming = data.items || [];
+    state.mediaPage = {
+      ...state.mediaPage,
+      offset,
+      total: data.total || incoming.length,
+      hasMore: Boolean(data.hasMore),
+      loading: false,
+    };
+
+    state.mediaItems = reset ? incoming : mergeMediaItems(state.mediaItems, incoming);
+
+    const firstChanged = reset && previousFirstId && state.mediaItems[0]?.id !== previousFirstId;
+    if (firstChanged && state.galleryView === "feed" && !state.autoScrollNew) {
+      requestAnimationFrame(() => {
+        const heightDelta = els.mediaGallery.scrollHeight - previousScrollHeight;
+        els.mediaGallery.scrollTop = previousScrollTop + Math.max(0, heightDelta);
+      });
+    } else if (firstChanged && state.autoScrollNew) {
+      state.activeMediaIndex = 0;
+      requestAnimationFrame(() => scrollActiveMedia("auto"));
+    }
+  } catch (error) {
+    state.mediaPage.loading = false;
+    throw error;
+  } finally {
+    renderGalleryFooter();
+  }
+}
+
+function mergeMediaItems(current, incoming) {
+  const seen = new Set(current.map((item) => item.id));
+  return current.concat(incoming.filter((item) => !seen.has(item.id)));
 }
 
 function mergeLiveJob(job) {
@@ -838,36 +951,42 @@ function renderAssignments(assignments) {
 }
 
 function collectGalleryItems() {
-  return state.jobs
-    .filter((job) => job.status === "done")
-    .flatMap((job) => (job.outputs || []).map((output, index) => ({
-      ...output,
-      id: `${job.promptId || job.id}-${index}-${output.filename}`,
-      backendName: job.backendName || "Backend",
-      promptId: job.promptId || job.id,
-      completedAt: job.completedAt || job.createdAt || "",
-    })));
+  return state.mediaItems;
 }
 
 function renderMediaGallery() {
   const items = collectGalleryItems();
   state.galleryItems = items;
-  const signature = `${state.galleryView}:${items.map((item) => item.id).join("|")}`;
+  const signature = `${state.galleryView}:${items.map((item) => item.id).join("|")}:${state.mediaPage.total}`;
   const videoCount = items.filter((item) => item.kind === "video").length;
   els.downloadVideos.disabled = videoCount === 0;
   els.downloadVideos.textContent = videoCount ? `Download ${videoCount} video${videoCount === 1 ? "" : "s"}` : "Download videos";
+  renderGalleryFooter();
   if (signature === state.gallerySignature) return;
   state.gallerySignature = signature;
 
   els.mediaGallery.className = `media-gallery ${state.galleryView === "feed" ? "feed-mode" : "grid-mode"}`;
   els.mediaGallery.classList.toggle("empty-state", !items.length);
   if (!items.length) {
+    if (state.galleryScrollObserver) state.galleryScrollObserver.disconnect();
     els.mediaGallery.textContent = "Finished images and videos will appear here.";
     return;
   }
 
   els.mediaGallery.innerHTML = items.map((item, index) => renderGalleryItem(item, index)).join("");
   observeFeedVideos();
+  observeGalleryEnd();
+}
+
+function renderGalleryFooter() {
+  const shown = state.mediaItems.length;
+  const total = state.mediaPage.total || shown;
+  els.galleryCount.textContent = total
+    ? `${shown} of ${total} item${total === 1 ? "" : "s"}`
+    : "0 items";
+  els.loadMoreMedia.hidden = !state.mediaPage.hasMore && !state.mediaPage.loading;
+  els.loadMoreMedia.disabled = state.mediaPage.loading;
+  els.loadMoreMedia.textContent = state.mediaPage.loading ? "Loading..." : "Load more";
 }
 
 function renderGalleryItem(item, index) {
@@ -895,6 +1014,7 @@ function setGalleryView(view) {
   els.gridView.classList.toggle("active", view === "grid");
   els.feedView.classList.toggle("active", view === "feed");
   renderMediaGallery();
+  if (view === "feed") requestAnimationFrame(() => scrollActiveMedia("auto"));
 }
 
 function observeFeedVideos() {
@@ -919,11 +1039,62 @@ function observeFeedVideos() {
   videos.forEach((video) => state.mediaObserver.observe(video));
 }
 
+function observeGalleryEnd() {
+  if (state.galleryScrollObserver) state.galleryScrollObserver.disconnect();
+  if (!state.mediaPage.hasMore || !state.galleryItems.length) return;
+
+  const lastItem = els.mediaGallery.querySelector(".gallery-item:last-child");
+  if (!lastItem) return;
+
+  state.galleryScrollObserver = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) loadMediaPage().then(renderMediaGallery).catch(console.warn);
+  }, {
+    root: state.galleryView === "feed" ? els.mediaGallery : null,
+    rootMargin: "480px 0px",
+  });
+  state.galleryScrollObserver.observe(lastItem);
+}
+
 function moveFeed(step) {
   if (state.galleryView !== "feed" || !state.galleryItems.length) return;
-  state.activeMediaIndex = Math.max(0, Math.min(state.galleryItems.length - 1, state.activeMediaIndex + step));
+  const nextIndex = state.activeMediaIndex + step;
+  if (nextIndex >= state.galleryItems.length && state.mediaPage.hasMore) {
+    loadMediaPage().then(() => {
+      renderMediaGallery();
+      state.activeMediaIndex = Math.min(nextIndex, state.galleryItems.length - 1);
+      scrollActiveMedia();
+    }).catch(console.warn);
+    return;
+  }
+  if (nextIndex < 0) {
+    state.activeMediaIndex = state.galleryItems.length - 1;
+  } else if (nextIndex >= state.galleryItems.length) {
+    state.activeMediaIndex = 0;
+  } else {
+    state.activeMediaIndex = nextIndex;
+  }
+  scrollActiveMedia();
+}
+
+function scrollActiveMedia(behavior = "smooth") {
   const item = els.mediaGallery.querySelector(`[data-media-index="${state.activeMediaIndex}"]`);
-  item?.scrollIntoView({ behavior: "smooth", block: "center" });
+  item?.scrollIntoView({ behavior, block: "center" });
+}
+
+function handleGalleryScroll() {
+  if (state.galleryView !== "feed" || state.feedLooping) return;
+  const nearBottom = els.mediaGallery.scrollTop + els.mediaGallery.clientHeight >= els.mediaGallery.scrollHeight - 8;
+  if (!nearBottom || state.galleryItems.length < 2) return;
+  if (state.mediaPage.hasMore) {
+    loadMediaPage().then(renderMediaGallery).catch(console.warn);
+    return;
+  }
+  state.feedLooping = true;
+  state.activeMediaIndex = 0;
+  els.mediaGallery.scrollTo({ top: 0, behavior: "smooth" });
+  setTimeout(() => {
+    state.feedLooping = false;
+  }, 650);
 }
 
 function downloadAllVideos() {
@@ -948,6 +1119,7 @@ els.workflowFile.addEventListener("change", async () => {
     state.workflow = JSON.parse(text);
     state.inputs = extractInputs(state.workflow);
     state.selectedInputs.clear();
+    state.hiddenInputIds.clear();
     renderInputs();
     updateVariantCount();
     updateSubmitState();
@@ -957,12 +1129,16 @@ els.workflowFile.addEventListener("change", async () => {
 });
 
 els.inputFilter.addEventListener("input", renderInputs);
+els.showHiddenInputs.addEventListener("click", () => {
+  state.hiddenInputIds.clear();
+  renderInputs();
+});
 els.addBackend.addEventListener("click", () => {
   collectBackendsFromDom();
   state.backends.push({
     id: `backend-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     name: `GPU ${state.backends.length + 1}`,
-    url: "",
+    url: nextLocalBackendUrl(state.backends),
   });
   renderBackends();
   connectBackendSockets();
@@ -974,6 +1150,15 @@ els.submitJobs.addEventListener("click", submitJobs);
 els.refreshJobs.addEventListener("click", loadJobs);
 els.gridView.addEventListener("click", () => setGalleryView("grid"));
 els.feedView.addEventListener("click", () => setGalleryView("feed"));
+els.autoScrollNew.checked = state.autoScrollNew;
+els.autoScrollNew.addEventListener("change", () => {
+  state.autoScrollNew = els.autoScrollNew.checked;
+  localStorage.setItem("autoScrollNewMedia", String(state.autoScrollNew));
+});
+els.loadMoreMedia.addEventListener("click", () => {
+  loadMediaPage().then(renderMediaGallery).catch(console.warn);
+});
+els.mediaGallery.addEventListener("scroll", handleGalleryScroll);
 els.downloadVideos.addEventListener("click", downloadAllVideos);
 window.addEventListener("keydown", (event) => {
   if (state.galleryView !== "feed") return;

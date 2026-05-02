@@ -63,7 +63,10 @@
           <div class="panel workflow-panel">
             <div class="panel-heading">
               <h2>Workflow Inputs</h2>
-              <input id="inputFilter" class="filter-input" type="search" placeholder="Filter inputs" />
+              <div class="input-tools">
+                <button id="showHiddenInputs" class="ghost-button" type="button" hidden>Unhide all</button>
+                <input id="inputFilter" class="filter-input" type="search" placeholder="Filter inputs" />
+              </div>
             </div>
             <div id="inputList" class="input-list empty-state">
               Upload a ComfyUI API workflow JSON to find CLIPTextEncode, LoadImage, and primitive nodes.
@@ -93,10 +96,18 @@
                     <button id="gridView" class="segmented-button active" type="button">Grid</button>
                     <button id="feedView" class="segmented-button" type="button">Feed</button>
                   </div>
+                  <label class="toggle-option">
+                    <input id="autoScrollNew" type="checkbox" checked />
+                    <span>Follow new</span>
+                  </label>
                   <button id="downloadVideos" class="ghost-button" type="button" disabled>Download videos</button>
                 </div>
               </div>
               <div id="mediaGallery" class="media-gallery grid-mode empty-state">Finished images and videos will appear here.</div>
+              <div class="gallery-footer">
+                <span id="galleryCount">0 items</span>
+                <button id="loadMoreMedia" class="ghost-button" type="button" hidden>Load more</button>
+              </div>
             </section>
           </div>
         </section>
@@ -119,6 +130,7 @@
           <span class="input-title"></span>
         </label>
         <div class="input-meta"></div>
+        <button class="hide-input ghost-button" type="button">Hide</button>
         <textarea class="values-input" rows="3" placeholder="One value per line" disabled></textarea>
         <div class="scalar-list" hidden></div>
         <button class="add-scalar ghost-button" type="button" hidden>Add value</button>
