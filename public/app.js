@@ -44,16 +44,19 @@ const state = {
   jobCards: new Map(),
   mediaItems: [],
   mediaPage: {
-    limit: 36,
-    offset: 0,
+    limit: 10,
     total: 0,
     hasMore: false,
     loading: false,
+    latestCursor: "",
+    nextCursor: "",
   },
   galleryView: "grid",
   galleryItems: [],
   activeMediaIndex: 0,
+  mediaNodes: new Map(),
   mediaObserver: null,
+  mediaHydrationObserver: null,
   galleryScrollObserver: null,
   gallerySignature: "",
   autoScrollNew: localStorage.getItem("autoScrollNewMedia") !== "false",
@@ -275,6 +278,8 @@ function renderInputs() {
     const imagePicker = node.querySelector(".image-picker");
     const imageInput = node.querySelector(".image-input");
     const previewList = node.querySelector(".image-preview-list");
+    const randomizeOption = node.querySelector(".randomize-option");
+    const randomizeInt = node.querySelector(".randomize-int");
     const hideInput = node.querySelector(".hide-input");
     const selected = state.selectedInputs.get(input.id);
 
@@ -303,6 +308,9 @@ function renderInputs() {
     } else {
       valuesInput.hidden = true;
       imagePicker.hidden = true;
+      randomizeOption.hidden = input.controlType !== "int";
+      randomizeInt.checked = Boolean(selected?.randomizeBeforeGeneration);
+      randomizeInt.disabled = !toggle.checked;
       scalarList.hidden = false;
       addScalar.hidden = false;
       addScalar.disabled = !toggle.checked;
@@ -311,7 +319,7 @@ function renderInputs() {
 
     toggle.addEventListener("change", () => {
       if (toggle.checked) {
-        state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+        state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
       } else {
         state.selectedInputs.delete(input.id);
         if (input.kind === "image") renderFilePreview(previewList, []);
@@ -319,32 +327,39 @@ function renderInputs() {
       valuesInput.disabled = !toggle.checked;
       imageInput.disabled = false;
       addScalar.disabled = !toggle.checked;
+      randomizeInt.disabled = !toggle.checked;
       setScalarListDisabled(scalarList, !toggle.checked);
       updateVariantCount();
       updateSubmitState();
     });
 
     valuesInput.addEventListener("input", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
       updateVariantCount();
     });
 
     imageInput.addEventListener("change", () => {
       if (imageInput.files.length) toggle.checked = true;
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
       renderFilePreview(previewList, [...imageInput.files]);
       updateVariantCount();
       updateSubmitState();
     });
 
     scalarList.addEventListener("input", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
       updateVariantCount();
     });
 
     scalarList.addEventListener("change", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
       updateVariantCount();
+    });
+
+    randomizeInt.addEventListener("change", () => {
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
+      updateVariantCount();
+      updateSubmitState();
     });
 
     scalarList.addEventListener("click", (event) => {
@@ -352,13 +367,13 @@ function renderInputs() {
       if (!removeButton) return;
       removeButton.closest(".scalar-row").remove();
       if (!scalarList.querySelector(".scalar-row")) addScalarRow(scalarList, input, input.value, !toggle.checked);
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
       updateVariantCount();
     });
 
     addScalar.addEventListener("click", () => {
       addScalarRow(scalarList, input, defaultScalarValue(input), !toggle.checked);
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList));
+      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
       updateVariantCount();
     });
 
@@ -380,7 +395,7 @@ function labelForKind(kind) {
   return "Primitive";
 }
 
-function selectionFromControls(input, valuesInput, imageInput, scalarList) {
+function selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt) {
   if (input.kind === "image") {
     return {
       nodeId: input.nodeId,
@@ -393,13 +408,16 @@ function selectionFromControls(input, valuesInput, imageInput, scalarList) {
   }
 
   if (input.controlType !== "multiline") {
+    const randomizeBeforeGeneration = input.controlType === "int" && Boolean(randomizeInt?.checked);
+    const values = readScalarValues(scalarList, input);
     return {
       nodeId: input.nodeId,
       nodeTitle: input.nodeTitle,
       inputName: input.inputName,
       valueType: input.valueType,
       kind: input.kind,
-      values: readScalarValues(scalarList, input),
+      randomizeBeforeGeneration,
+      values: randomizeBeforeGeneration && !values.length ? [0] : values,
     };
   }
 
@@ -789,24 +807,37 @@ async function loadMediaPage({ reset = false } = {}) {
   const previousFirstId = state.mediaItems[0]?.id || "";
   const previousScrollHeight = els.mediaGallery.scrollHeight;
   const previousScrollTop = els.mediaGallery.scrollTop;
+  const refreshCursor = reset ? state.mediaPage.latestCursor : "";
 
   try {
-    const offset = reset ? 0 : state.mediaItems.length;
-    const limit = reset ? Math.max(state.mediaPage.limit, state.mediaItems.length || 0) : state.mediaPage.limit;
-    const data = await api(`/api/media?limit=${limit}&offset=${offset}`);
+    const params = new URLSearchParams({ limit: String(state.mediaPage.limit) });
+    if (refreshCursor) params.set("since", refreshCursor);
+    if (!reset && state.mediaPage.nextCursor) params.set("before", state.mediaPage.nextCursor);
+    const data = await api(`/api/media?${params.toString()}`);
     const incoming = data.items || [];
+    const loadingNewer = Boolean(refreshCursor);
+    const knownIds = new Set(state.mediaItems.map((item) => item.id));
+    const newItemCount = incoming.filter((item) => !knownIds.has(item.id)).length;
     state.mediaPage = {
       ...state.mediaPage,
-      offset,
       total: data.total || incoming.length,
-      hasMore: Boolean(data.hasMore),
+      hasMore: loadingNewer ? state.mediaPage.hasMore : Boolean(data.hasMore),
+      latestCursor: data.latestCursor || state.mediaPage.latestCursor,
+      nextCursor: loadingNewer ? state.mediaPage.nextCursor : (data.nextCursor || state.mediaPage.nextCursor),
       loading: false,
     };
 
-    state.mediaItems = reset ? incoming : mergeMediaItems(state.mediaItems, incoming);
+    if (loadingNewer) {
+      state.mediaItems = mergeFreshMediaItems(incoming, state.mediaItems);
+    } else if (reset) {
+      state.mediaItems = incoming;
+    } else {
+      state.mediaItems = mergeMediaItems(state.mediaItems, incoming);
+    }
 
     const firstChanged = reset && previousFirstId && state.mediaItems[0]?.id !== previousFirstId;
     if (firstChanged && state.galleryView === "feed" && !state.autoScrollNew) {
+      state.activeMediaIndex += newItemCount;
       requestAnimationFrame(() => {
         const heightDelta = els.mediaGallery.scrollHeight - previousScrollHeight;
         els.mediaGallery.scrollTop = previousScrollTop + Math.max(0, heightDelta);
@@ -826,6 +857,17 @@ async function loadMediaPage({ reset = false } = {}) {
 function mergeMediaItems(current, incoming) {
   const seen = new Set(current.map((item) => item.id));
   return current.concat(incoming.filter((item) => !seen.has(item.id)));
+}
+
+function mergeFreshMediaItems(incoming, current) {
+  const seen = new Set();
+  const merged = [];
+  for (const item of incoming.concat(current)) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    merged.push(item);
+  }
+  return merged;
 }
 
 function mergeLiveJob(job) {
@@ -957,24 +999,27 @@ function collectGalleryItems() {
 function renderMediaGallery() {
   const items = collectGalleryItems();
   state.galleryItems = items;
-  const signature = `${state.galleryView}:${items.map((item) => item.id).join("|")}:${state.mediaPage.total}`;
   const videoCount = items.filter((item) => item.kind === "video").length;
   els.downloadVideos.disabled = videoCount === 0;
   els.downloadVideos.textContent = videoCount ? `Download ${videoCount} video${videoCount === 1 ? "" : "s"}` : "Download videos";
   renderGalleryFooter();
-  if (signature === state.gallerySignature) return;
-  state.gallerySignature = signature;
 
   els.mediaGallery.className = `media-gallery ${state.galleryView === "feed" ? "feed-mode" : "grid-mode"}`;
   els.mediaGallery.classList.toggle("empty-state", !items.length);
   if (!items.length) {
     if (state.galleryScrollObserver) state.galleryScrollObserver.disconnect();
+    if (state.mediaObserver) state.mediaObserver.disconnect();
+    if (state.mediaHydrationObserver) state.mediaHydrationObserver.disconnect();
+    state.mediaNodes.clear();
     els.mediaGallery.textContent = "Finished images and videos will appear here.";
     return;
   }
 
-  els.mediaGallery.innerHTML = items.map((item, index) => renderGalleryItem(item, index)).join("");
+  syncGalleryDom(items);
+  state.activeMediaIndex = Math.min(state.activeMediaIndex, Math.max(0, items.length - 1));
+  updateVideoWindow();
   observeFeedVideos();
+  observeMediaHydration();
   observeGalleryEnd();
 }
 
@@ -989,22 +1034,88 @@ function renderGalleryFooter() {
   els.loadMoreMedia.textContent = state.mediaPage.loading ? "Loading..." : "Load more";
 }
 
-function renderGalleryItem(item, index) {
-  const url = escapeHtml(item.url);
-  const filename = escapeHtml(item.filename);
-  const meta = `${escapeHtml(item.backendName)} | ${escapeHtml(item.kind)}`;
-  const media = item.kind === "video"
-    ? `<video src="${url}" title="${filename}" controls loop muted playsinline preload="metadata"></video>`
-    : `<img src="${url}" alt="${filename}" loading="lazy" />`;
-  return `
-    <figure class="gallery-item" data-media-index="${index}">
-      <div class="gallery-media">${media}</div>
-      <figcaption>
-        <strong>${filename}</strong>
-        <span>${meta}</span>
-      </figcaption>
-    </figure>
-  `;
+function syncGalleryDom(items) {
+  if (els.mediaGallery.firstChild?.nodeType === Node.TEXT_NODE) els.mediaGallery.textContent = "";
+
+  const wanted = new Set(items.map((item) => item.id));
+  let anchor = els.mediaGallery.firstElementChild;
+  items.forEach((item, index) => {
+    let node = state.mediaNodes.get(item.id);
+    if (!node) {
+      node = createGalleryItem();
+      state.mediaNodes.set(item.id, node);
+    }
+    updateGalleryItem(node, item, index);
+    if (node !== anchor) els.mediaGallery.insertBefore(node, anchor);
+    anchor = node.nextElementSibling;
+  });
+
+  for (const [id, node] of state.mediaNodes) {
+    if (wanted.has(id)) continue;
+    node.remove();
+    state.mediaNodes.delete(id);
+  }
+}
+
+function createGalleryItem() {
+  const figure = document.createElement("figure");
+  figure.className = "gallery-item";
+
+  const mediaWrap = document.createElement("div");
+  mediaWrap.className = "gallery-media";
+
+  const caption = document.createElement("figcaption");
+  caption.append(document.createElement("strong"), document.createElement("span"));
+
+  figure.append(mediaWrap, caption);
+  return figure;
+}
+
+function updateGalleryItem(node, item, index) {
+  node.dataset.mediaIndex = String(index);
+  node.dataset.mediaId = item.id;
+  const mediaWrap = node.querySelector(".gallery-media");
+  let media = mediaWrap.firstElementChild;
+  if (!media || media.dataset.kind !== item.kind) {
+    media?.remove();
+    media = createMediaElement(item);
+    mediaWrap.append(media);
+  }
+
+  media.dataset.src = item.url;
+  media.dataset.kind = item.kind;
+  if (item.kind === "video") {
+    media.title = item.filename;
+  } else if (media.src !== item.url) {
+    media.src = item.url;
+    media.alt = item.filename;
+  }
+
+  node.querySelector("figcaption strong").textContent = item.filename;
+  node.querySelector("figcaption span").textContent = `${item.backendName} | ${item.kind}`;
+}
+
+function createMediaElement(item) {
+  if (item.kind !== "video") {
+    const image = document.createElement("img");
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.alt = item.filename;
+    image.src = item.url;
+    image.dataset.kind = item.kind;
+    return image;
+  }
+
+  const video = document.createElement("video");
+  video.controls = true;
+  video.loop = true;
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "none";
+  video.title = item.filename;
+  video.dataset.kind = item.kind;
+  video.dataset.src = item.url;
+  return video;
 }
 
 function setGalleryView(view) {
@@ -1028,7 +1139,12 @@ function observeFeedVideos() {
   state.mediaObserver = new IntersectionObserver((entries) => {
     for (const entry of entries) {
       const video = entry.target;
+      const item = video.closest(".gallery-item");
+      const index = Number(item?.dataset.mediaIndex || 0);
       if (entry.isIntersecting && entry.intersectionRatio > 0.65) {
+        state.activeMediaIndex = index;
+        hydrateVideo(video, "auto");
+        updateVideoWindow();
         video.play().catch(() => {});
       } else {
         video.pause();
@@ -1037,6 +1153,62 @@ function observeFeedVideos() {
   }, { root: els.mediaGallery, threshold: [0, 0.65, 1] });
 
   videos.forEach((video) => state.mediaObserver.observe(video));
+}
+
+function observeMediaHydration() {
+  if (state.mediaHydrationObserver) state.mediaHydrationObserver.disconnect();
+  const videos = [...els.mediaGallery.querySelectorAll("video")];
+  if (!videos.length) return;
+
+  state.mediaHydrationObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const video = entry.target;
+      const item = video.closest(".gallery-item");
+      const index = Number(item?.dataset.mediaIndex || 0);
+      if (entry.isIntersecting) {
+        hydrateVideo(video, "metadata");
+      } else if (state.galleryView === "feed" && Math.abs(index - state.activeMediaIndex) > 1) {
+        dehydrateVideo(video);
+      }
+    }
+  }, {
+    root: state.galleryView === "feed" ? els.mediaGallery : null,
+    rootMargin: state.galleryView === "feed" ? "120% 0px" : "900px 0px",
+    threshold: 0.01,
+  });
+
+  videos.forEach((video) => state.mediaHydrationObserver.observe(video));
+}
+
+function updateVideoWindow() {
+  if (state.galleryView !== "feed") return;
+  const videos = [...els.mediaGallery.querySelectorAll("video")];
+  for (const video of videos) {
+    const index = Number(video.closest(".gallery-item")?.dataset.mediaIndex || 0);
+    const distance = Math.abs(index - state.activeMediaIndex);
+    if (distance <= 1) {
+      hydrateVideo(video, distance === 0 ? "auto" : "metadata");
+    } else if (distance > 2) {
+      dehydrateVideo(video);
+    }
+  }
+}
+
+function hydrateVideo(video, preload = "metadata") {
+  const source = video.dataset.src;
+  if (!source) return;
+  video.preload = preload;
+  if (video.getAttribute("src") === source) return;
+  video.src = source;
+  video.load();
+}
+
+function dehydrateVideo(video) {
+  if (!video.getAttribute("src")) return;
+  video.pause();
+  video.removeAttribute("src");
+  video.preload = "none";
+  video.load();
 }
 
 function observeGalleryEnd() {
@@ -1050,7 +1222,7 @@ function observeGalleryEnd() {
     if (entries.some((entry) => entry.isIntersecting)) loadMediaPage().then(renderMediaGallery).catch(console.warn);
   }, {
     root: state.galleryView === "feed" ? els.mediaGallery : null,
-    rootMargin: "480px 0px",
+    rootMargin: state.galleryView === "feed" ? "900px 0px" : "700px 0px",
   });
   state.galleryScrollObserver.observe(lastItem);
 }
@@ -1066,13 +1238,8 @@ function moveFeed(step) {
     }).catch(console.warn);
     return;
   }
-  if (nextIndex < 0) {
-    state.activeMediaIndex = state.galleryItems.length - 1;
-  } else if (nextIndex >= state.galleryItems.length) {
-    state.activeMediaIndex = 0;
-  } else {
-    state.activeMediaIndex = nextIndex;
-  }
+  state.activeMediaIndex = Math.max(0, Math.min(nextIndex, state.galleryItems.length - 1));
+  updateVideoWindow();
   scrollActiveMedia();
 }
 
@@ -1082,19 +1249,34 @@ function scrollActiveMedia(behavior = "smooth") {
 }
 
 function handleGalleryScroll() {
-  if (state.galleryView !== "feed" || state.feedLooping) return;
-  const nearBottom = els.mediaGallery.scrollTop + els.mediaGallery.clientHeight >= els.mediaGallery.scrollHeight - 8;
-  if (!nearBottom || state.galleryItems.length < 2) return;
+  if (state.galleryView !== "feed") return;
+  updateActiveMediaFromScroll();
+  const nearBottom = els.mediaGallery.scrollTop + els.mediaGallery.clientHeight >= els.mediaGallery.scrollHeight - 900;
+  if (!nearBottom || state.galleryItems.length < 2 || state.mediaPage.loading) return;
   if (state.mediaPage.hasMore) {
     loadMediaPage().then(renderMediaGallery).catch(console.warn);
-    return;
   }
-  state.feedLooping = true;
-  state.activeMediaIndex = 0;
-  els.mediaGallery.scrollTo({ top: 0, behavior: "smooth" });
-  setTimeout(() => {
-    state.feedLooping = false;
-  }, 650);
+}
+
+function updateActiveMediaFromScroll() {
+  const items = [...els.mediaGallery.querySelectorAll(".gallery-item")];
+  if (!items.length) return;
+  const galleryRect = els.mediaGallery.getBoundingClientRect();
+  const center = galleryRect.top + galleryRect.height / 2;
+  let nearestIndex = state.activeMediaIndex;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const item of items) {
+    const rect = item.getBoundingClientRect();
+    const distance = Math.abs(rect.top + rect.height / 2 - center);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = Number(item.dataset.mediaIndex || 0);
+    }
+  }
+  if (nearestIndex !== state.activeMediaIndex) {
+    state.activeMediaIndex = nearestIndex;
+    updateVideoWindow();
+  }
 }
 
 function downloadAllVideos() {

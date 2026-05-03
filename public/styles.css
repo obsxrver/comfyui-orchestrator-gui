@@ -338,6 +338,23 @@ textarea:focus {
   opacity: 0.55;
 }
 
+.randomize-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.randomize-option input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
 .scalar-list {
   display: grid;
   gap: 8px;
@@ -656,6 +673,8 @@ textarea:focus {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #151820;
+  content-visibility: auto;
+  contain-intrinsic-size: 280px;
 }
 
 .gallery-media {
@@ -709,6 +728,7 @@ textarea:focus {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   min-height: calc(100vh - 300px);
+  contain-intrinsic-size: 720px;
   scroll-snap-align: center;
 }
 

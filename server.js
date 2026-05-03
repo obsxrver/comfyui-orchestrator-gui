@@ -22,7 +22,15 @@ const state = {
   eventClients: new Set(),
   comfySockets: new Map(),
   activePromptByBackend: new Map(),
+  mediaIndex: {
+    dirty: true,
+    scannedAt: 0,
+    items: [],
+  },
 };
+
+const MEDIA_INDEX_TTL_MS = 5000;
+const RANDOM_PRIMITIVE_INT_MAX = 2 ** 32;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -268,6 +276,7 @@ function buildVariants(workflow, selections) {
         inputName: selection.inputName,
         valueType: selection.valueType,
         kind: selection.kind,
+        randomizeBeforeGeneration: selection.valueType === "int" && Boolean(selection.randomizeBeforeGeneration),
         value,
       }));
     })
@@ -298,13 +307,21 @@ async function prepareAssignments(backend, assignments) {
         displayValue: assignment.value.name || uploaded.workflowValue,
       });
     } else {
+      const value = assignment.randomizeBeforeGeneration
+        ? randomPrimitiveInt()
+        : assignment.value;
       prepared.push({
         ...assignment,
-        displayValue: assignment.value,
+        value,
+        displayValue: value,
       });
     }
   }
   return prepared;
+}
+
+function randomPrimitiveInt() {
+  return crypto.randomInt(0, RANDOM_PRIMITIVE_INT_MAX);
 }
 
 async function uploadInputImage(backend, image) {
@@ -587,12 +604,40 @@ function mediaUrl(filename) {
   return `/media/${encodeURIComponent(filename)}`;
 }
 
-async function listMediaFiles(kindFilter = "") {
+function markMediaIndexDirty() {
+  state.mediaIndex.dirty = true;
+}
+
+function mediaCursor(item) {
+  return Buffer.from(JSON.stringify([item.mtimeMs, item.filename]), "utf8").toString("base64url");
+}
+
+function parseMediaCursor(cursor) {
+  if (!cursor) return null;
+  try {
+    const [mtimeMs, filename] = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (!Number.isFinite(Number(mtimeMs)) || typeof filename !== "string") return null;
+    return { mtimeMs: Number(mtimeMs), filename };
+  } catch {
+    return null;
+  }
+}
+
+function isOlderThanCursor(item, cursor) {
+  return item.mtimeMs < cursor.mtimeMs || (item.mtimeMs === cursor.mtimeMs && item.filename > cursor.filename);
+}
+
+function cursorIndex(items, cursor) {
+  if (!cursor) return -1;
+  return items.findIndex((item) => item.mtimeMs === cursor.mtimeMs && item.filename === cursor.filename);
+}
+
+async function scanMediaIndex() {
   const names = await fs.promises.readdir(MEDIA_DIR);
   const items = await Promise.all(names.map(async (filename) => {
     const ext = path.extname(filename).toLowerCase();
     const kind = mediaKinds[ext];
-    if (!kind || (kindFilter && kind !== kindFilter)) return null;
+    if (!kind) return null;
     const filePath = path.join(MEDIA_DIR, filename);
     const stat = await fs.promises.stat(filePath).catch(() => null);
     if (!stat?.isFile()) return null;
@@ -607,7 +652,65 @@ async function listMediaFiles(kindFilter = "") {
       mtimeMs: stat.mtimeMs,
     };
   }));
-  return items.filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename));
+  return items
+    .filter(Boolean)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename))
+    .map((item) => ({ ...item, cursor: mediaCursor(item) }));
+}
+
+async function getMediaIndex({ force = false } = {}) {
+  const index = state.mediaIndex;
+  const fresh = Date.now() - index.scannedAt < MEDIA_INDEX_TTL_MS;
+  if (!force && !index.dirty && fresh) return index.items;
+  index.items = await scanMediaIndex();
+  index.scannedAt = Date.now();
+  index.dirty = false;
+  return index.items;
+}
+
+async function listMediaFiles(kindFilter = "") {
+  const items = await getMediaIndex();
+  return kindFilter ? items.filter((item) => item.kind === kindFilter) : items;
+}
+
+async function listMediaPage({ limit, before = "", since = "", kind = "" }) {
+  const allItems = await getMediaIndex();
+  const items = kind ? allItems.filter((item) => item.kind === kind) : allItems;
+  const sinceCursor = parseMediaCursor(since);
+  const beforeCursor = parseMediaCursor(before);
+
+  if (sinceCursor) {
+    let boundary = cursorIndex(items, sinceCursor);
+    if (boundary < 0) boundary = items.findIndex((item) => isOlderThanCursor(item, sinceCursor));
+    if (boundary < 0) boundary = items.length;
+    const allNewerItems = items.slice(0, boundary);
+    const newest = allNewerItems.slice(Math.max(0, allNewerItems.length - limit));
+    return {
+      items: newest,
+      total: items.length,
+      latestCursor: newest[0]?.cursor || "",
+      nextCursor: "",
+      hasMore: false,
+      hasNewer: allNewerItems.length > limit,
+    };
+  }
+
+  let start = 0;
+  if (beforeCursor) {
+    const exactIndex = cursorIndex(items, beforeCursor);
+    start = exactIndex >= 0 ? exactIndex + 1 : items.findIndex((item) => isOlderThanCursor(item, beforeCursor));
+    if (start < 0) start = items.length;
+  }
+
+  const page = items.slice(start, start + limit);
+  return {
+    items: page,
+    total: items.length,
+    latestCursor: items[0]?.cursor || "",
+    nextCursor: page.at(-1)?.cursor || before || "",
+    hasMore: start + limit < items.length,
+    hasNewer: false,
+  };
 }
 
 function localMediaName(job, output, index) {
@@ -638,6 +741,7 @@ async function cacheJobOutputs(job, backend) {
       });
       const { buffer } = await comfyFetch(backend, `/view?${params.toString()}`);
       await fs.promises.writeFile(localPath, buffer);
+      markMediaIndexDirty();
     }
 
     output.localFilename = localFilename;
@@ -934,15 +1038,21 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/media" && req.method === "GET") {
-    const limit = Math.max(1, Math.min(120, Number(url.searchParams.get("limit")) || 36));
-    const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
-    const items = await listMediaFiles();
+    const limit = Math.max(1, Math.min(48, Number(url.searchParams.get("limit")) || 10));
+    const before = url.searchParams.get("before") || "";
+    const since = url.searchParams.get("since") || "";
+    const kind = url.searchParams.get("kind") || "";
+    const page = await listMediaPage({ limit, before, since, kind });
     return sendJson(res, 200, {
-      items: items.slice(offset, offset + limit),
-      total: items.length,
-      offset,
+      items: page.items,
+      total: page.total,
       limit,
-      hasMore: offset + limit < items.length,
+      before,
+      since,
+      latestCursor: page.latestCursor,
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
+      hasNewer: page.hasNewer,
     });
   }
 
