@@ -14,19 +14,29 @@ const els = {
   jobList: document.querySelector("#jobList"),
   activeSummary: document.querySelector("#activeSummary"),
   mediaGallery: document.querySelector("#mediaGallery"),
+  galleryPageTitle: document.querySelector("#galleryPageTitle"),
   gridView: document.querySelector("#gridView"),
   feedView: document.querySelector("#feedView"),
   autoScrollNew: document.querySelector("#autoScrollNew"),
   downloadVideos: document.querySelector("#downloadVideos"),
   galleryCount: document.querySelector("#galleryCount"),
-  loadMoreMedia: document.querySelector("#loadMoreMedia"),
+  galleryPrev: document.querySelector("#galleryPrev"),
+  galleryNext: document.querySelector("#galleryNext"),
+  galleryPages: document.querySelector("#galleryPages"),
+  itemsPerPage: document.querySelector("#itemsPerPage"),
   variantCount: document.querySelector("#variantCount"),
   activeCount: document.querySelector("#activeCount"),
-  overallProgress: document.querySelector("#overallProgress"),
-  overallProgressBar: document.querySelector("#overallProgressBar"),
+  editorGrid: document.querySelector(".editor-grid"),
+  columnResizer: document.querySelector("#columnResizer"),
+  toggleInputsPanel: document.querySelector("#toggleInputsPanel"),
+  toggleGalleryPanel: document.querySelector("#toggleGalleryPanel"),
+  hideInputsPanel: document.querySelector("#hideInputsPanel"),
+  hideGalleryPanel: document.querySelector("#hideGalleryPanel"),
   backendTemplate: document.querySelector("#backendTemplate"),
   inputTemplate: document.querySelector("#inputTemplate"),
 };
+
+const defaultMediaLimit = Number(localStorage.getItem("galleryItemsPerPage")) || 10;
 
 const state = {
   workflow: null,
@@ -44,12 +54,13 @@ const state = {
   jobCards: new Map(),
   mediaItems: [],
   mediaPage: {
-    limit: 10,
+    limit: [10, 20, 30, 48].includes(defaultMediaLimit) ? defaultMediaLimit : 10,
+    page: 1,
     total: 0,
-    hasMore: false,
+    totalPages: 1,
+    hasNext: false,
+    hasPrevious: false,
     loading: false,
-    latestCursor: "",
-    nextCursor: "",
   },
   galleryView: "grid",
   galleryItems: [],
@@ -57,11 +68,17 @@ const state = {
   mediaNodes: new Map(),
   mediaObserver: null,
   mediaHydrationObserver: null,
-  galleryScrollObserver: null,
-  gallerySignature: "",
   autoScrollNew: localStorage.getItem("autoScrollNewMedia") !== "false",
   feedLooping: false,
+  layout: {
+    inputsVisible: localStorage.getItem("inputsPanelVisible") !== "false",
+    galleryVisible: localStorage.getItem("galleryPanelVisible") !== "false",
+  },
 };
+
+if (!state.layout.inputsVisible && !state.layout.galleryVisible) {
+  state.layout.galleryVisible = true;
+}
 
 function api(path, options = {}) {
   return fetch(path, {
@@ -363,7 +380,6 @@ function renderInputs() {
 
     hideInput.addEventListener("click", () => {
       state.hiddenInputIds.add(input.id);
-      state.selectedInputs.delete(input.id);
       renderInputs();
       updateVariantCount();
       updateSubmitState();
@@ -799,7 +815,7 @@ async function loadJobs() {
   try {
     const [jobsData] = await Promise.all([
       api("/api/jobs"),
-      loadMediaPage({ reset: true }),
+      loadMediaPage(),
     ]);
     state.jobs = (jobsData.jobs || state.jobs).map(mergeLiveJob);
     renderJobs();
@@ -808,74 +824,35 @@ async function loadJobs() {
   }
 }
 
-async function loadMediaPage({ reset = false } = {}) {
+async function loadMediaPage({ page = state.mediaPage.page } = {}) {
   if (state.mediaPage.loading) return;
   state.mediaPage.loading = true;
   renderGalleryFooter();
-  const previousFirstId = state.mediaItems[0]?.id || "";
-  const previousScrollHeight = els.mediaGallery.scrollHeight;
-  const previousScrollTop = els.mediaGallery.scrollTop;
-  const refreshCursor = reset ? state.mediaPage.latestCursor : "";
 
   try {
-    const params = new URLSearchParams({ limit: String(state.mediaPage.limit) });
-    if (refreshCursor) params.set("since", refreshCursor);
-    if (!reset && state.mediaPage.nextCursor) params.set("before", state.mediaPage.nextCursor);
+    const params = new URLSearchParams({
+      limit: String(state.mediaPage.limit),
+      page: String(Math.max(1, page)),
+    });
     const data = await api(`/api/media?${params.toString()}`);
-    const incoming = data.items || [];
-    const loadingNewer = Boolean(refreshCursor);
-    const knownIds = new Set(state.mediaItems.map((item) => item.id));
-    const newItemCount = incoming.filter((item) => !knownIds.has(item.id)).length;
+    const totalPages = Math.max(1, Number(data.totalPages || 1));
     state.mediaPage = {
       ...state.mediaPage,
-      total: data.total || incoming.length,
-      hasMore: loadingNewer ? state.mediaPage.hasMore : Boolean(data.hasMore),
-      latestCursor: data.latestCursor || state.mediaPage.latestCursor,
-      nextCursor: loadingNewer ? state.mediaPage.nextCursor : (data.nextCursor || state.mediaPage.nextCursor),
+      page: Math.min(Math.max(1, Number(data.page || page)), totalPages),
+      total: Number(data.total || 0),
+      totalPages,
+      hasNext: Boolean(data.hasNext),
+      hasPrevious: Boolean(data.hasPrevious),
       loading: false,
     };
-
-    if (loadingNewer) {
-      state.mediaItems = mergeFreshMediaItems(incoming, state.mediaItems);
-    } else if (reset) {
-      state.mediaItems = incoming;
-    } else {
-      state.mediaItems = mergeMediaItems(state.mediaItems, incoming);
-    }
-
-    const firstChanged = reset && previousFirstId && state.mediaItems[0]?.id !== previousFirstId;
-    if (firstChanged && state.galleryView === "feed" && !state.autoScrollNew) {
-      state.activeMediaIndex += newItemCount;
-      requestAnimationFrame(() => {
-        const heightDelta = els.mediaGallery.scrollHeight - previousScrollHeight;
-        els.mediaGallery.scrollTop = previousScrollTop + Math.max(0, heightDelta);
-      });
-    } else if (firstChanged && state.autoScrollNew) {
-      state.activeMediaIndex = 0;
-      requestAnimationFrame(() => scrollActiveMedia("auto"));
-    }
+    state.mediaItems = data.items || [];
+    state.activeMediaIndex = 0;
   } catch (error) {
     state.mediaPage.loading = false;
     throw error;
   } finally {
     renderGalleryFooter();
   }
-}
-
-function mergeMediaItems(current, incoming) {
-  const seen = new Set(current.map((item) => item.id));
-  return current.concat(incoming.filter((item) => !seen.has(item.id)));
-}
-
-function mergeFreshMediaItems(incoming, current) {
-  const seen = new Set();
-  const merged = [];
-  for (const item of incoming.concat(current)) {
-    if (seen.has(item.id)) continue;
-    seen.add(item.id);
-    merged.push(item);
-  }
-  return merged;
 }
 
 function mergeLiveJob(job) {
@@ -889,7 +866,7 @@ function mergeLiveJob(job) {
 
 function renderJobs() {
   const jobs = state.jobs.filter((job) => !["done", "failed"].includes(job.status));
-  updateOverallProgress();
+  els.activeCount.textContent = String(jobs.length);
   renderMediaGallery();
   els.activeSummary.textContent = jobs.length
     ? `${jobs.length} active ${jobs.length === 1 ? "job" : "jobs"}`
@@ -958,15 +935,6 @@ function updateJobCard(card, job) {
   card.querySelector('[data-slot="error"]').innerHTML = job.error ? `<div class="error-text">${escapeHtml(job.error)}</div>` : "";
 }
 
-function updateOverallProgress() {
-  const active = state.jobs.filter((job) => !["done", "failed"].includes(job.status));
-  const values = active.map(progressPercent);
-  const average = values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
-  els.activeCount.textContent = String(active.length);
-  els.overallProgress.textContent = `${average}%`;
-  els.overallProgressBar.style.width = `${average}%`;
-}
-
 function renderProgress(job) {
   const percent = progressPercent(job);
   const node = job.currentNode || (job.status === "done" ? "Complete" : "Waiting for backend");
@@ -1015,7 +983,6 @@ function renderMediaGallery() {
   els.mediaGallery.className = `media-gallery ${state.galleryView === "feed" ? "feed-mode" : "grid-mode"}`;
   els.mediaGallery.classList.toggle("empty-state", !items.length);
   if (!items.length) {
-    if (state.galleryScrollObserver) state.galleryScrollObserver.disconnect();
     if (state.mediaObserver) state.mediaObserver.disconnect();
     if (state.mediaHydrationObserver) state.mediaHydrationObserver.disconnect();
     state.mediaNodes.clear();
@@ -1028,18 +995,54 @@ function renderMediaGallery() {
   updateVideoWindow();
   observeFeedVideos();
   observeMediaHydration();
-  observeGalleryEnd();
 }
 
 function renderGalleryFooter() {
   const shown = state.mediaItems.length;
-  const total = state.mediaPage.total || shown;
+  const total = state.mediaPage.total || 0;
+  const page = state.mediaPage.page;
+  const totalPages = state.mediaPage.totalPages;
+  const start = total && shown ? ((page - 1) * state.mediaPage.limit) + 1 : 0;
+  const end = total && shown ? start + shown - 1 : 0;
+  els.galleryPageTitle.textContent = totalPages > 1 ? `Page ${page} of ${totalPages}` : "Most recent outputs";
   els.galleryCount.textContent = total
-    ? `${shown} of ${total} item${total === 1 ? "" : "s"}`
+    ? `${start}-${end} of ${total} item${total === 1 ? "" : "s"}`
     : "0 items";
-  els.loadMoreMedia.hidden = !state.mediaPage.hasMore && !state.mediaPage.loading;
-  els.loadMoreMedia.disabled = state.mediaPage.loading;
-  els.loadMoreMedia.textContent = state.mediaPage.loading ? "Loading..." : "Load more";
+  els.galleryPrev.disabled = state.mediaPage.loading || !state.mediaPage.hasPrevious;
+  els.galleryNext.disabled = state.mediaPage.loading || !state.mediaPage.hasNext;
+  els.itemsPerPage.value = String(state.mediaPage.limit);
+  renderPageButtons();
+}
+
+function renderPageButtons() {
+  els.galleryPages.innerHTML = "";
+  const pages = visibleGalleryPages(state.mediaPage.page, state.mediaPage.totalPages);
+  let previous = 0;
+  for (const page of pages) {
+    if (previous && page - previous > 1) {
+      const gap = document.createElement("span");
+      gap.className = "page-gap";
+      gap.textContent = "...";
+      els.galleryPages.append(gap);
+    }
+    const button = document.createElement("button");
+    button.className = "page-button";
+    button.type = "button";
+    button.textContent = String(page);
+    button.dataset.page = String(page);
+    button.classList.toggle("active", page === state.mediaPage.page);
+    button.disabled = state.mediaPage.loading || page === state.mediaPage.page;
+    els.galleryPages.append(button);
+    previous = page;
+  }
+}
+
+function visibleGalleryPages(page, totalPages) {
+  const pages = new Set([1, page, page + 1, page + 2, totalPages]);
+  if (page > 1) pages.add(page - 1);
+  return [...pages]
+    .filter((item) => item >= 1 && item <= totalPages)
+    .sort((left, right) => left - right);
 }
 
 function syncGalleryDom(items) {
@@ -1129,7 +1132,6 @@ function createMediaElement(item) {
 function setGalleryView(view) {
   state.galleryView = view;
   state.activeMediaIndex = 0;
-  state.gallerySignature = "";
   els.gridView.classList.toggle("active", view === "grid");
   els.feedView.classList.toggle("active", view === "feed");
   renderMediaGallery();
@@ -1219,29 +1221,23 @@ function dehydrateVideo(video) {
   video.load();
 }
 
-function observeGalleryEnd() {
-  if (state.galleryScrollObserver) state.galleryScrollObserver.disconnect();
-  if (!state.mediaPage.hasMore || !state.galleryItems.length) return;
-
-  const lastItem = els.mediaGallery.querySelector(".gallery-item:last-child");
-  if (!lastItem) return;
-
-  state.galleryScrollObserver = new IntersectionObserver((entries) => {
-    if (entries.some((entry) => entry.isIntersecting)) loadMediaPage().then(renderMediaGallery).catch(console.warn);
-  }, {
-    root: state.galleryView === "feed" ? els.mediaGallery : null,
-    rootMargin: state.galleryView === "feed" ? "900px 0px" : "700px 0px",
-  });
-  state.galleryScrollObserver.observe(lastItem);
-}
-
 function moveFeed(step) {
   if (state.galleryView !== "feed" || !state.galleryItems.length) return;
   const nextIndex = state.activeMediaIndex + step;
-  if (nextIndex >= state.galleryItems.length && state.mediaPage.hasMore) {
-    loadMediaPage().then(() => {
+  if (nextIndex >= state.galleryItems.length && state.mediaPage.hasNext) {
+    loadMediaPage({ page: state.mediaPage.page + 1 }).then(() => {
       renderMediaGallery();
-      state.activeMediaIndex = Math.min(nextIndex, state.galleryItems.length - 1);
+      state.activeMediaIndex = 0;
+      updateVideoWindow();
+      scrollActiveMedia();
+    }).catch(console.warn);
+    return;
+  }
+  if (nextIndex < 0 && state.mediaPage.hasPrevious) {
+    loadMediaPage({ page: state.mediaPage.page - 1 }).then(() => {
+      renderMediaGallery();
+      state.activeMediaIndex = Math.max(0, state.galleryItems.length - 1);
+      updateVideoWindow();
       scrollActiveMedia();
     }).catch(console.warn);
     return;
@@ -1259,11 +1255,6 @@ function scrollActiveMedia(behavior = "smooth") {
 function handleGalleryScroll() {
   if (state.galleryView !== "feed") return;
   updateActiveMediaFromScroll();
-  const nearBottom = els.mediaGallery.scrollTop + els.mediaGallery.clientHeight >= els.mediaGallery.scrollHeight - 900;
-  if (!nearBottom || state.galleryItems.length < 2 || state.mediaPage.loading) return;
-  if (state.mediaPage.hasMore) {
-    loadMediaPage().then(renderMediaGallery).catch(console.warn);
-  }
 }
 
 function updateActiveMediaFromScroll() {
@@ -1290,6 +1281,61 @@ function updateActiveMediaFromScroll() {
 function downloadAllVideos() {
   if (!state.galleryItems.some((item) => item.kind === "video")) return;
   window.location.href = "/api/videos/download";
+}
+
+function goToGalleryPage(page) {
+  const nextPage = Math.max(1, Math.min(page, state.mediaPage.totalPages));
+  loadMediaPage({ page: nextPage }).then(renderMediaGallery).catch(console.warn);
+}
+
+function setPanelVisibility(panel, visible) {
+  if (panel === "inputs") {
+    state.layout.inputsVisible = visible;
+    if (!visible) state.layout.galleryVisible = true;
+  } else {
+    state.layout.galleryVisible = visible;
+    if (!visible) state.layout.inputsVisible = true;
+  }
+  localStorage.setItem("inputsPanelVisible", String(state.layout.inputsVisible));
+  localStorage.setItem("galleryPanelVisible", String(state.layout.galleryVisible));
+  renderLayoutState();
+}
+
+function renderLayoutState() {
+  els.editorGrid.classList.toggle("inputs-collapsed", !state.layout.inputsVisible);
+  els.editorGrid.classList.toggle("gallery-collapsed", !state.layout.galleryVisible);
+  els.toggleInputsPanel.classList.toggle("active", state.layout.inputsVisible);
+  els.toggleGalleryPanel.classList.toggle("active", state.layout.galleryVisible);
+  els.toggleInputsPanel.textContent = state.layout.inputsVisible ? "Inputs" : "Show inputs";
+  els.toggleGalleryPanel.textContent = state.layout.galleryVisible ? "Gallery" : "Show gallery";
+  els.hideInputsPanel.textContent = state.layout.inputsVisible ? "Hide inputs" : "Show inputs";
+  els.hideGalleryPanel.textContent = state.layout.galleryVisible ? "Hide gallery" : "Show gallery";
+}
+
+function restoreColumnWidth() {
+  const saved = localStorage.getItem("workflowColumnWidth");
+  if (saved) els.editorGrid.style.setProperty("--workflow-column", saved);
+}
+
+function startColumnResize(event) {
+  if (!state.layout.inputsVisible || !state.layout.galleryVisible) return;
+  event.preventDefault();
+  els.editorGrid.classList.add("resizing");
+  const onPointerMove = (moveEvent) => {
+    const rect = els.editorGrid.getBoundingClientRect();
+    const percent = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+    const clamped = Math.max(24, Math.min(68, percent));
+    const value = `${clamped.toFixed(1)}%`;
+    els.editorGrid.style.setProperty("--workflow-column", value);
+    localStorage.setItem("workflowColumnWidth", value);
+  };
+  const onPointerUp = () => {
+    els.editorGrid.classList.remove("resizing");
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+  };
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp, { once: true });
 }
 
 function escapeHtml(value) {
@@ -1345,11 +1391,27 @@ els.autoScrollNew.addEventListener("change", () => {
   state.autoScrollNew = els.autoScrollNew.checked;
   localStorage.setItem("autoScrollNewMedia", String(state.autoScrollNew));
 });
-els.loadMoreMedia.addEventListener("click", () => {
-  loadMediaPage().then(renderMediaGallery).catch(console.warn);
+els.galleryPrev.addEventListener("click", () => goToGalleryPage(state.mediaPage.page - 1));
+els.galleryNext.addEventListener("click", () => goToGalleryPage(state.mediaPage.page + 1));
+els.galleryPages.addEventListener("click", (event) => {
+  const button = event.target.closest(".page-button");
+  if (!button) return;
+  goToGalleryPage(Number(button.dataset.page));
+});
+els.itemsPerPage.value = String(state.mediaPage.limit);
+els.itemsPerPage.addEventListener("change", () => {
+  state.mediaPage.limit = Number(els.itemsPerPage.value) || 10;
+  state.mediaPage.page = 1;
+  localStorage.setItem("galleryItemsPerPage", String(state.mediaPage.limit));
+  loadMediaPage({ page: 1 }).then(renderMediaGallery).catch(console.warn);
 });
 els.mediaGallery.addEventListener("scroll", handleGalleryScroll);
 els.downloadVideos.addEventListener("click", downloadAllVideos);
+els.toggleInputsPanel.addEventListener("click", () => setPanelVisibility("inputs", !state.layout.inputsVisible));
+els.toggleGalleryPanel.addEventListener("click", () => setPanelVisibility("gallery", !state.layout.galleryVisible));
+els.hideInputsPanel.addEventListener("click", () => setPanelVisibility("inputs", false));
+els.hideGalleryPanel.addEventListener("click", () => setPanelVisibility("gallery", false));
+els.columnResizer.addEventListener("pointerdown", startColumnResize);
 window.addEventListener("keydown", (event) => {
   if (state.galleryView !== "feed") return;
   if (event.key === "ArrowDown") {
@@ -1362,6 +1424,8 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
+restoreColumnWidth();
+renderLayoutState();
 loadBackends();
 loadClientId();
 detectGpus();

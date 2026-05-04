@@ -40,13 +40,13 @@
             <span>Active jobs</span>
             <strong id="activeCount">0</strong>
           </div>
-          <div class="metric metric-wide">
-            <span>Overall progress</span>
-            <strong id="overallProgress">0%</strong>
-            <div class="progress-track">
-              <div id="overallProgressBar" class="progress-fill"></div>
+          <section class="active-section sidebar-active">
+            <div class="section-title">
+              <h3>In Progress</h3>
+              <span id="activeSummary">No active jobs</span>
             </div>
-          </div>
+            <div id="jobList" class="job-list compact-jobs empty-state">Queued outputs will appear here.</div>
+          </section>
         </section>
       </aside>
 
@@ -56,7 +56,13 @@
             <input id="workflowFile" type="file" accept=".json,application/json" />
             <span>Upload workflow JSON</span>
           </label>
-          <button id="submitJobs" class="primary-button" disabled>Queue variants</button>
+          <div class="topbar-actions">
+            <div class="segmented-control" aria-label="Workspace layout">
+              <button id="toggleInputsPanel" class="segmented-button active" type="button">Inputs</button>
+              <button id="toggleGalleryPanel" class="segmented-button active" type="button">Gallery</button>
+            </div>
+            <button id="submitJobs" class="primary-button" disabled>Queue variants</button>
+          </div>
         </header>
 
         <section class="editor-grid">
@@ -65,6 +71,7 @@
               <h2>Workflow Inputs</h2>
               <div class="input-tools">
                 <button id="showHiddenInputs" class="ghost-button" type="button" hidden>Unhide all</button>
+                <button id="hideInputsPanel" class="ghost-button" type="button">Hide inputs</button>
                 <input id="inputFilter" class="filter-input" type="search" placeholder="Filter inputs" />
               </div>
             </div>
@@ -73,24 +80,19 @@
             </div>
           </div>
 
+          <div id="columnResizer" class="column-resizer" role="separator" aria-label="Resize workflow and gallery columns"></div>
+
           <div class="panel output-panel">
             <div class="panel-heading">
-              <h2>Outputs</h2>
+              <h2>Gallery</h2>
               <div class="player-actions">
+                <button id="hideGalleryPanel" class="ghost-button" type="button">Hide gallery</button>
                 <button id="refreshJobs" class="ghost-button">Refresh</button>
               </div>
             </div>
-            <section class="active-section">
-              <div class="section-title">
-                <h3>In Progress</h3>
-                <span id="activeSummary">No active jobs</span>
-              </div>
-              <div id="jobList" class="job-list compact-jobs empty-state">Queued outputs will appear here.</div>
-            </section>
-
             <section class="gallery-section">
               <div class="section-title gallery-title">
-                <h3>Gallery</h3>
+                <h3 id="galleryPageTitle">Most recent outputs</h3>
                 <div class="gallery-actions">
                   <div class="segmented-control" aria-label="Gallery view">
                     <button id="gridView" class="segmented-button active" type="button">Grid</button>
@@ -106,7 +108,20 @@
               <div id="mediaGallery" class="media-gallery grid-mode empty-state">Finished images and videos will appear here.</div>
               <div class="gallery-footer">
                 <span id="galleryCount">0 items</span>
-                <button id="loadMoreMedia" class="ghost-button" type="button" hidden>Load more</button>
+                <div class="gallery-pager" aria-label="Gallery pages">
+                  <button id="galleryPrev" class="ghost-button" type="button">Previous</button>
+                  <div id="galleryPages" class="page-list"></div>
+                  <button id="galleryNext" class="ghost-button" type="button">Next</button>
+                </div>
+                <label class="items-per-page">
+                  <span>Items per page</span>
+                  <select id="itemsPerPage">
+                    <option value="10">10</option>
+                    <option value="20">20</option>
+                    <option value="30">30</option>
+                    <option value="48">48</option>
+                  </select>
+                </label>
               </div>
             </section>
           </div>

@@ -34,7 +34,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -42,9 +43,14 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(300px, 380px) 1fr;
+  grid-template-columns: minmax(320px, 390px) 1fr;
   min-height: 100vh;
 }
 
@@ -156,18 +162,24 @@ h3 {
 
 .backend-row {
   display: grid;
-  grid-template-columns: 0.8fr 1fr 34px;
+  grid-template-columns: minmax(0, 1fr) 34px;
   gap: 8px;
   align-items: center;
+}
+
+.backend-url {
+  grid-column: 1 / -1;
 }
 
 .backend-status {
   grid-column: 1 / -1;
   min-height: 16px;
+  line-height: 1.35;
 }
 
 input,
-textarea {
+textarea,
+select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -183,7 +195,8 @@ textarea {
 }
 
 input:focus,
-textarea:focus {
+textarea:focus,
+select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
@@ -239,6 +252,13 @@ textarea:focus {
   background: var(--bg);
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .upload-zone {
   display: inline-flex;
   align-items: center;
@@ -261,10 +281,14 @@ textarea:focus {
   min-width: 160px;
 }
 
+.topbar .segmented-control {
+  flex: 0 0 auto;
+}
+
 .editor-grid {
   display: grid;
-  grid-template-columns: minmax(380px, 0.7fr) minmax(440px, 1fr);
-  gap: 18px;
+  grid-template-columns: minmax(300px, var(--workflow-column, 38%)) 10px minmax(360px, 1fr);
+  gap: 12px;
   align-items: start;
 }
 
@@ -276,8 +300,38 @@ textarea:focus {
 
 .output-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
+}
+
+.column-resizer {
+  align-self: stretch;
+  min-height: calc(100vh - 84px);
+  border-radius: 999px;
+  cursor: col-resize;
+  background: linear-gradient(90deg, transparent 3px, var(--line-strong) 3px, var(--line-strong) 7px, transparent 7px);
+  opacity: 0.6;
+}
+
+.column-resizer:hover,
+.editor-grid.resizing .column-resizer {
+  opacity: 1;
+  background: linear-gradient(90deg, transparent 3px, var(--accent) 3px, var(--accent) 7px, transparent 7px);
+}
+
+.editor-grid.inputs-collapsed {
+  grid-template-columns: 1fr;
+}
+
+.editor-grid.gallery-collapsed {
+  grid-template-columns: 1fr;
+}
+
+.editor-grid.inputs-collapsed .workflow-panel,
+.editor-grid.inputs-collapsed .column-resizer,
+.editor-grid.gallery-collapsed .output-panel,
+.editor-grid.gallery-collapsed .column-resizer {
+  display: none;
 }
 
 .filter-input {
@@ -451,10 +505,6 @@ textarea:focus {
   background: var(--surface-soft);
 }
 
-.metric-wide {
-  grid-column: 1 / -1;
-}
-
 .metric strong {
   display: block;
   margin-top: 4px;
@@ -542,8 +592,13 @@ textarea:focus {
 }
 
 .compact-jobs {
-  max-height: 240px;
+  max-height: 340px;
   overflow: auto;
+}
+
+.sidebar-active {
+  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .active-job-card {
@@ -635,7 +690,7 @@ textarea:focus {
 }
 
 .media-gallery {
-  min-height: 420px;
+  min-height: min(62vh, 760px);
 }
 
 .media-gallery.empty-state {
@@ -643,9 +698,9 @@ textarea:focus {
 }
 
 .gallery-footer {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   min-height: 38px;
   margin-top: 12px;
@@ -653,13 +708,70 @@ textarea:focus {
   font-size: 12px;
 }
 
-.gallery-footer .ghost-button {
+.gallery-footer .ghost-button,
+.items-per-page select {
   min-height: 34px;
+}
+
+.gallery-pager,
+.page-list,
+.items-per-page {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gallery-pager {
+  justify-content: center;
+}
+
+.page-list {
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.page-button {
+  min-width: 34px;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 9px;
+  color: var(--muted);
+  background: #101319;
+  font-weight: 700;
+}
+
+.page-button.active {
+  border-color: var(--accent);
+  color: #07111f;
+  background: var(--accent);
+}
+
+.page-button.active:disabled {
+  opacity: 1;
+}
+
+.page-gap {
+  color: var(--muted);
+  padding: 0 2px;
+}
+
+.items-per-page {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.items-per-page select {
+  width: auto;
+  padding: 0 30px 0 10px;
 }
 
 .media-gallery.grid-mode {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 12px;
   align-content: start;
 }
@@ -760,9 +872,25 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .column-resizer {
+    display: none;
+  }
+
   .workflow-panel,
   .output-panel {
     min-height: auto;
+  }
+
+  .gallery-footer {
+    grid-template-columns: 1fr;
+  }
+
+  .gallery-pager {
+    justify-content: stretch;
+  }
+
+  .gallery-pager .ghost-button {
+    flex: 1;
   }
 
   .media-gallery.feed-mode {
@@ -783,9 +911,16 @@ textarea:focus {
   }
 
   .topbar .primary-button,
-  .upload-zone {
+  .upload-zone,
+  .topbar-actions,
+  .topbar .segmented-control {
     width: 100%;
     justify-content: center;
+  }
+
+  .topbar-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .panel-heading {
@@ -829,7 +964,9 @@ textarea:focus {
   .gallery-actions,
   .segmented-control,
   .toggle-option,
-  .gallery-actions .ghost-button {
+  .gallery-actions .ghost-button,
+  .items-per-page,
+  .items-per-page select {
     width: 100%;
   }
 
@@ -866,15 +1003,5 @@ textarea:focus {
 
   .backend-row {
     grid-template-columns: 1fr 34px;
-  }
-
-  .backend-url {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
-
-  .remove-backend {
-    grid-column: 2;
-    grid-row: 1;
   }
 }

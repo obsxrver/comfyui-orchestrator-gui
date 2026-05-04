@@ -608,30 +608,6 @@ function markMediaIndexDirty() {
   state.mediaIndex.dirty = true;
 }
 
-function mediaCursor(item) {
-  return Buffer.from(JSON.stringify([item.mtimeMs, item.filename]), "utf8").toString("base64url");
-}
-
-function parseMediaCursor(cursor) {
-  if (!cursor) return null;
-  try {
-    const [mtimeMs, filename] = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-    if (!Number.isFinite(Number(mtimeMs)) || typeof filename !== "string") return null;
-    return { mtimeMs: Number(mtimeMs), filename };
-  } catch {
-    return null;
-  }
-}
-
-function isOlderThanCursor(item, cursor) {
-  return item.mtimeMs < cursor.mtimeMs || (item.mtimeMs === cursor.mtimeMs && item.filename > cursor.filename);
-}
-
-function cursorIndex(items, cursor) {
-  if (!cursor) return -1;
-  return items.findIndex((item) => item.mtimeMs === cursor.mtimeMs && item.filename === cursor.filename);
-}
-
 async function scanMediaIndex() {
   const names = await fs.promises.readdir(MEDIA_DIR);
   const items = await Promise.all(names.map(async (filename) => {
@@ -654,8 +630,7 @@ async function scanMediaIndex() {
   }));
   return items
     .filter(Boolean)
-    .sort((a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename))
-    .map((item) => ({ ...item, cursor: mediaCursor(item) }));
+    .sort((a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename));
 }
 
 async function getMediaIndex({ force = false } = {}) {
@@ -673,43 +648,20 @@ async function listMediaFiles(kindFilter = "") {
   return kindFilter ? items.filter((item) => item.kind === kindFilter) : items;
 }
 
-async function listMediaPage({ limit, before = "", since = "", kind = "" }) {
+async function listMediaPage({ limit, page = 1, kind = "" }) {
   const allItems = await getMediaIndex();
   const items = kind ? allItems.filter((item) => item.kind === kind) : allItems;
-  const sinceCursor = parseMediaCursor(since);
-  const beforeCursor = parseMediaCursor(before);
-
-  if (sinceCursor) {
-    let boundary = cursorIndex(items, sinceCursor);
-    if (boundary < 0) boundary = items.findIndex((item) => isOlderThanCursor(item, sinceCursor));
-    if (boundary < 0) boundary = items.length;
-    const allNewerItems = items.slice(0, boundary);
-    const newest = allNewerItems.slice(Math.max(0, allNewerItems.length - limit));
-    return {
-      items: newest,
-      total: items.length,
-      latestCursor: newest[0]?.cursor || "",
-      nextCursor: "",
-      hasMore: false,
-      hasNewer: allNewerItems.length > limit,
-    };
-  }
-
-  let start = 0;
-  if (beforeCursor) {
-    const exactIndex = cursorIndex(items, beforeCursor);
-    start = exactIndex >= 0 ? exactIndex + 1 : items.findIndex((item) => isOlderThanCursor(item, beforeCursor));
-    if (start < 0) start = items.length;
-  }
-
-  const page = items.slice(start, start + limit);
+  const totalPages = Math.max(1, Math.ceil(items.length / limit));
+  const currentPage = Math.max(1, Math.min(Number(page) || 1, totalPages));
+  const start = (currentPage - 1) * limit;
+  const pageItems = items.slice(start, start + limit);
   return {
-    items: page,
+    items: pageItems,
     total: items.length,
-    latestCursor: items[0]?.cursor || "",
-    nextCursor: page.at(-1)?.cursor || before || "",
-    hasMore: start + limit < items.length,
-    hasNewer: false,
+    page: currentPage,
+    totalPages,
+    hasPrevious: currentPage > 1,
+    hasNext: currentPage < totalPages,
   };
 }
 
@@ -1039,20 +991,17 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/media" && req.method === "GET") {
     const limit = Math.max(1, Math.min(48, Number(url.searchParams.get("limit")) || 10));
-    const before = url.searchParams.get("before") || "";
-    const since = url.searchParams.get("since") || "";
+    const pageNumber = Math.max(1, Number(url.searchParams.get("page")) || 1);
     const kind = url.searchParams.get("kind") || "";
-    const page = await listMediaPage({ limit, before, since, kind });
+    const page = await listMediaPage({ limit, page: pageNumber, kind });
     return sendJson(res, 200, {
       items: page.items,
       total: page.total,
       limit,
-      before,
-      since,
-      latestCursor: page.latestCursor,
-      nextCursor: page.nextCursor,
-      hasMore: page.hasMore,
-      hasNewer: page.hasNewer,
+      page: page.page,
+      totalPages: page.totalPages,
+      hasPrevious: page.hasPrevious,
+      hasNext: page.hasNext,
     });
   }
 
