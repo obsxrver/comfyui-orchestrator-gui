@@ -278,7 +278,7 @@ function renderInputs() {
   els.inputList.innerHTML = "";
   els.inputList.classList.toggle("empty-state", !inputs.length);
   if (!state.workflow) {
-    els.inputList.textContent = "Upload a ComfyUI API workflow JSON to find CLIPTextEncode, LoadImage, and primitive nodes.";
+    els.inputList.textContent = "Upload a ComfyUI API workflow JSON or media with Prompt metadata to find CLIPTextEncode, LoadImage, and primitive nodes.";
     return;
   }
   if (!inputs.length) {
@@ -786,6 +786,33 @@ function readFilePayload(file) {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+async function workflowFromFile(file) {
+  if (isJsonWorkflowFile(file)) {
+    return JSON.parse(await file.text());
+  }
+  const payload = await readFilePayload(file);
+  const data = await api("/api/workflow/from-media", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return data.workflow;
+}
+
+function isJsonWorkflowFile(file) {
+  const name = file.name.toLowerCase();
+  return file.type === "application/json" || name.endsWith(".json");
+}
+
+function loadWorkflow(workflow) {
+  state.workflow = workflow;
+  state.inputs = extractInputs(state.workflow);
+  state.selectedInputs.clear();
+  state.hiddenInputIds.clear();
+  renderInputs();
+  updateVariantCount();
+  updateSubmitState();
 }
 
 async function submitJobs() {
@@ -1338,6 +1365,11 @@ function startColumnResize(event) {
   window.addEventListener("pointerup", onPointerUp, { once: true });
 }
 
+function isEditingText(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest("textarea, input, select, [contenteditable='true']"));
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -1350,17 +1382,12 @@ function escapeHtml(value) {
 els.workflowFile.addEventListener("change", async () => {
   const file = els.workflowFile.files[0];
   if (!file) return;
-  const text = await file.text();
   try {
-    state.workflow = JSON.parse(text);
-    state.inputs = extractInputs(state.workflow);
-    state.selectedInputs.clear();
-    state.hiddenInputIds.clear();
-    renderInputs();
-    updateVariantCount();
-    updateSubmitState();
+    loadWorkflow(await workflowFromFile(file));
   } catch (error) {
-    alert(`Workflow JSON could not be parsed: ${error.message}`);
+    alert(`Workflow could not be loaded: ${error.message}`);
+  } finally {
+    els.workflowFile.value = "";
   }
 });
 
@@ -1414,6 +1441,7 @@ els.hideGalleryPanel.addEventListener("click", () => setPanelVisibility("gallery
 els.columnResizer.addEventListener("pointerdown", startColumnResize);
 window.addEventListener("keydown", (event) => {
   if (state.galleryView !== "feed") return;
+  if (isEditingText(event.target)) return;
   if (event.key === "ArrowDown") {
     moveFeed(1);
     event.preventDefault();
