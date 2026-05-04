@@ -30,7 +30,7 @@ const state = {
 };
 
 const MEDIA_INDEX_TTL_MS = 5000;
-const RANDOM_PRIMITIVE_INT_MAX = 2 ** 32;
+const RANDOM_PRIMITIVE_INT_LIMIT = 2 ** 32;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -321,7 +321,7 @@ async function prepareAssignments(backend, assignments) {
 }
 
 function randomPrimitiveInt() {
-  return crypto.randomInt(0, RANDOM_PRIMITIVE_INT_MAX);
+  return Math.abs(crypto.randomInt(-RANDOM_PRIMITIVE_INT_LIMIT, RANDOM_PRIMITIVE_INT_LIMIT));
 }
 
 async function uploadInputImage(backend, image) {

@@ -247,10 +247,12 @@ function nextLocalBackendUrl(backends) {
 function renderInputs() {
   const filter = els.inputFilter.value.trim().toLowerCase();
   const visibleInputs = state.inputs.filter((input) => !state.hiddenInputIds.has(input.id));
-  const inputs = visibleInputs.filter((input) => {
-    const haystack = `${input.nodeTitle} ${input.classType} ${input.inputName} ${input.preview}`.toLowerCase();
-    return haystack.includes(filter);
-  });
+  const inputs = visibleInputs
+    .filter((input) => {
+      const haystack = `${input.nodeTitle} ${input.classType} ${input.inputName} ${input.preview}`.toLowerCase();
+      return haystack.includes(filter);
+    })
+    .sort(compareInputsByTitle);
   els.showHiddenInputs.hidden = state.hiddenInputIds.size === 0;
   els.showHiddenInputs.textContent = state.hiddenInputIds.size
     ? `Unhide all (${state.hiddenInputIds.size})`
@@ -271,7 +273,6 @@ function renderInputs() {
 
   for (const input of inputs) {
     const node = els.inputTemplate.content.firstElementChild.cloneNode(true);
-    const toggle = node.querySelector(".vary-toggle");
     const valuesInput = node.querySelector(".values-input");
     const scalarList = node.querySelector(".scalar-list");
     const addScalar = node.querySelector(".add-scalar");
@@ -283,9 +284,13 @@ function renderInputs() {
     const hideInput = node.querySelector(".hide-input");
     const selected = state.selectedInputs.get(input.id);
 
-    toggle.checked = Boolean(selected);
-    node.querySelector(".input-title").textContent = `${labelForKind(input.kind)} - ${input.nodeTitle}`;
+    node.querySelector(".input-title").textContent = input.nodeTitle;
     node.querySelector(".input-meta").textContent = `${input.classType} #${input.nodeId} | ${input.inputName} | current: ${trim(input.preview, 130)}`;
+
+    const canRandomize = isPrimitiveIntInput(input);
+    randomizeOption.hidden = true;
+    imagePicker.hidden = true;
+    imageInput.disabled = true;
 
     if (input.kind === "image") {
       valuesInput.hidden = true;
@@ -300,81 +305,60 @@ function renderInputs() {
       scalarList.hidden = true;
       addScalar.hidden = true;
       valuesInput.hidden = false;
-      valuesInput.disabled = !toggle.checked;
+      valuesInput.disabled = false;
       valuesInput.placeholder = input.kind === "text"
         ? "One prompt per line, or separate multi-line prompts with ---"
         : "Separate multiline primitive variants with ---";
       valuesInput.value = selected?.rawValue || input.preview;
     } else {
       valuesInput.hidden = true;
-      imagePicker.hidden = true;
-      randomizeOption.hidden = input.controlType !== "int";
+      randomizeOption.hidden = !canRandomize;
       randomizeInt.checked = Boolean(selected?.randomizeBeforeGeneration);
-      randomizeInt.disabled = !toggle.checked;
+      randomizeInt.disabled = !canRandomize;
       scalarList.hidden = false;
       addScalar.hidden = false;
-      addScalar.disabled = !toggle.checked;
-      renderScalarList(scalarList, input, selected?.values || [input.value], !toggle.checked);
+      addScalar.disabled = false;
+      renderScalarList(scalarList, input, selected?.values || [input.value], false);
     }
 
-    toggle.addEventListener("change", () => {
-      if (toggle.checked) {
-        state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
-      } else {
-        state.selectedInputs.delete(input.id);
-        if (input.kind === "image") renderFilePreview(previewList, []);
-      }
-      valuesInput.disabled = !toggle.checked;
-      imageInput.disabled = false;
-      addScalar.disabled = !toggle.checked;
-      randomizeInt.disabled = !toggle.checked;
-      setScalarListDisabled(scalarList, !toggle.checked);
+    const updateSelection = () => {
+      syncSelectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt);
       updateVariantCount();
       updateSubmitState();
-    });
+    };
 
     valuesInput.addEventListener("input", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
-      updateVariantCount();
+      updateSelection();
     });
 
     imageInput.addEventListener("change", () => {
-      if (imageInput.files.length) toggle.checked = true;
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
       renderFilePreview(previewList, [...imageInput.files]);
-      updateVariantCount();
-      updateSubmitState();
+      updateSelection();
     });
 
     scalarList.addEventListener("input", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
-      updateVariantCount();
+      updateSelection();
     });
 
     scalarList.addEventListener("change", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
-      updateVariantCount();
+      updateSelection();
     });
 
     randomizeInt.addEventListener("change", () => {
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
-      updateVariantCount();
-      updateSubmitState();
+      updateSelection();
     });
 
     scalarList.addEventListener("click", (event) => {
       const removeButton = event.target.closest(".remove-scalar");
       if (!removeButton) return;
       removeButton.closest(".scalar-row").remove();
-      if (!scalarList.querySelector(".scalar-row")) addScalarRow(scalarList, input, input.value, !toggle.checked);
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
-      updateVariantCount();
+      if (!scalarList.querySelector(".scalar-row")) addScalarRow(scalarList, input, input.value, false);
+      updateSelection();
     });
 
     addScalar.addEventListener("click", () => {
-      addScalarRow(scalarList, input, defaultScalarValue(input), !toggle.checked);
-      if (toggle.checked) state.selectedInputs.set(input.id, selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt));
-      updateVariantCount();
+      addScalarRow(scalarList, input, defaultScalarValue(input), false);
+      updateSelection();
     });
 
     hideInput.addEventListener("click", () => {
@@ -389,10 +373,40 @@ function renderInputs() {
   }
 }
 
-function labelForKind(kind) {
-  if (kind === "text") return "Prompt";
-  if (kind === "image") return "Image";
-  return "Primitive";
+function compareInputsByTitle(left, right) {
+  const titleOrder = left.nodeTitle.localeCompare(right.nodeTitle, undefined, { sensitivity: "base", numeric: true });
+  if (titleOrder) return titleOrder;
+  const inputOrder = left.inputName.localeCompare(right.inputName, undefined, { sensitivity: "base", numeric: true });
+  if (inputOrder) return inputOrder;
+  return String(left.nodeId).localeCompare(String(right.nodeId), undefined, { numeric: true });
+}
+
+function isPrimitiveIntInput(input) {
+  return input.kind === "primitive" && input.classType.toLowerCase() === "primitiveint";
+}
+
+function syncSelectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt) {
+  const selection = selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt);
+  if (selectionHasChanges(input, selection)) {
+    state.selectedInputs.set(input.id, selection);
+  } else {
+    state.selectedInputs.delete(input.id);
+  }
+}
+
+function selectionHasChanges(input, selection) {
+  const values = selection.values.filter(hasUiVariantValue);
+  if (selection.kind === "image") return values.length > 0;
+  if (selection.randomizeBeforeGeneration) return true;
+  if (!values.length) return false;
+  if (values.length !== 1) return true;
+  return !uiValuesEqual(values[0], input.value);
+}
+
+function uiValuesEqual(left, right) {
+  if (typeof right === "boolean") return Boolean(left) === right;
+  if (typeof right === "number") return Number(left) === right;
+  return String(left) === String(right ?? "");
 }
 
 function selectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt) {
@@ -408,7 +422,7 @@ function selectionFromControls(input, valuesInput, imageInput, scalarList, rando
   }
 
   if (input.controlType !== "multiline") {
-    const randomizeBeforeGeneration = input.controlType === "int" && Boolean(randomizeInt?.checked);
+    const randomizeBeforeGeneration = isPrimitiveIntInput(input) && Boolean(randomizeInt?.checked);
     const values = readScalarValues(scalarList, input);
     return {
       nodeId: input.nodeId,
@@ -468,10 +482,6 @@ function addScalarRow(container, input, value, disabled) {
 
   row.append(control, remove);
   container.append(row);
-}
-
-function setScalarListDisabled(container, disabled) {
-  for (const control of container.querySelectorAll("input, button")) control.disabled = disabled;
 }
 
 function readScalarValues(container, input) {
@@ -536,8 +546,6 @@ function bindImageDrop(dropZone, input, previewList) {
     event.preventDefault();
     const imageFiles = [...event.dataTransfer.files].filter((file) => file.type.startsWith("image/"));
     if (!imageFiles.length) return;
-    const toggle = dropZone.closest(".input-row").querySelector(".vary-toggle");
-    toggle.checked = true;
     state.selectedInputs.set(input.id, {
       nodeId: input.nodeId,
       nodeTitle: input.nodeTitle,
