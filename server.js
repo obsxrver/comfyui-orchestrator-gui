@@ -3,7 +3,6 @@ const https = require("https");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const zlib = require("zlib");
 const { URL } = require("url");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
@@ -32,8 +31,6 @@ const state = {
 
 const MEDIA_INDEX_TTL_MS = 5000;
 const RANDOM_PRIMITIVE_INT_LIMIT = 2 ** 32;
-const REQUEST_BODY_LIMIT_BYTES = 512 * 1024 * 1024;
-const LOOSE_METADATA_SCAN_BYTES = 24 * 1024 * 1024;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -113,7 +110,7 @@ function readBody(req) {
     req.setEncoding("utf8");
     req.on("data", (chunk) => {
       data += chunk;
-      if (data.length > REQUEST_BODY_LIMIT_BYTES) {
+      if (data.length > 80 * 1024 * 1024) {
         reject(new Error("Request body too large"));
         req.destroy();
       }
@@ -370,179 +367,6 @@ function publicAssignments(assignments) {
 function publicAssignmentValue(value) {
   if (value && typeof value === "object") return value.name || value.value || "[uploaded file]";
   return value;
-}
-
-function bufferFromDataUrl(dataUrl) {
-  const match = String(dataUrl || "").match(/^data:(.*?);base64,(.*)$/);
-  if (!match) throw new Error("Uploaded media payload is not a base64 data URL.");
-  return {
-    mimeType: match[1] || "application/octet-stream",
-    buffer: Buffer.from(match[2], "base64"),
-  };
-}
-
-function workflowFromMetadata(buffer, source = {}) {
-  const metadata = extractComfyMetadata(buffer);
-  const promptValue = getMetadataValue(metadata, "prompt");
-  const sourceName = source.name ? ` in ${source.name}` : "";
-  if (promptValue === undefined) throw new Error(`No Prompt metadata was found${sourceName}.`);
-  return parseWorkflowMetadata(promptValue);
-}
-
-function extractComfyMetadata(buffer) {
-  const metadata = {};
-  if (isPng(buffer)) Object.assign(metadata, extractPngTextMetadata(buffer));
-  for (const [key, value] of extractLoosePromptMetadata(buffer)) {
-    if (metadata[key] === undefined) metadata[key] = value;
-  }
-  return metadata;
-}
-
-function getMetadataValue(metadata, wantedKey) {
-  const match = Object.entries(metadata).find(([key]) => key.toLowerCase() === wantedKey);
-  return match?.[1];
-}
-
-function parseWorkflowMetadata(value) {
-  const parsed = typeof value === "string" ? JSON.parse(value) : value;
-  if (parsed && typeof parsed === "object" && parsed.prompt && typeof parsed.prompt === "object") {
-    return parsed.prompt;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Prompt metadata is not a workflow JSON object.");
-  }
-  return parsed;
-}
-
-function isPng(buffer) {
-  return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-}
-
-function extractPngTextMetadata(buffer) {
-  const metadata = {};
-  let offset = 8;
-  while (offset + 12 <= buffer.length) {
-    const length = buffer.readUInt32BE(offset);
-    const type = buffer.subarray(offset + 4, offset + 8).toString("latin1");
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + length;
-    if (dataEnd + 4 > buffer.length) break;
-    const data = buffer.subarray(dataStart, dataEnd);
-
-    if (type === "tEXt") {
-      const separator = data.indexOf(0);
-      if (separator >= 0) {
-        const key = data.subarray(0, separator).toString("latin1");
-        metadata[key] = data.subarray(separator + 1).toString("utf8");
-      }
-    } else if (type === "zTXt") {
-      const separator = data.indexOf(0);
-      if (separator >= 0 && data[separator + 1] === 0) {
-        const key = data.subarray(0, separator).toString("latin1");
-        const value = inflateUtf8(data.subarray(separator + 2));
-        if (value !== null) metadata[key] = value;
-      }
-    } else if (type === "iTXt") {
-      const entry = parsePngInternationalText(data);
-      if (entry) metadata[entry.key] = entry.value;
-    }
-
-    offset = dataEnd + 4;
-  }
-  return metadata;
-}
-
-function parsePngInternationalText(data) {
-  const keyEnd = data.indexOf(0);
-  if (keyEnd < 0 || keyEnd + 3 > data.length) return null;
-  const key = data.subarray(0, keyEnd).toString("latin1");
-  const compressionFlag = data[keyEnd + 1];
-  const compressionMethod = data[keyEnd + 2];
-  let offset = keyEnd + 3;
-  const languageEnd = data.indexOf(0, offset);
-  if (languageEnd < 0) return null;
-  offset = languageEnd + 1;
-  const translatedEnd = data.indexOf(0, offset);
-  if (translatedEnd < 0) return null;
-  offset = translatedEnd + 1;
-  const textBytes = data.subarray(offset);
-  if (compressionFlag === 1 && compressionMethod !== 0) return null;
-  const value = compressionFlag === 1 ? inflateUtf8(textBytes) : textBytes.toString("utf8");
-  if (value === null) return null;
-  return { key, value };
-}
-
-function inflateUtf8(buffer) {
-  try {
-    return zlib.inflateSync(buffer).toString("utf8");
-  } catch {
-    return null;
-  }
-}
-
-function extractLoosePromptMetadata(buffer) {
-  return looseMetadataBuffers(buffer).flatMap((chunk) => {
-    const texts = [chunk.toString("utf8")];
-    if (chunk.length % 2 === 0) texts.push(chunk.toString("utf16le"));
-    return texts.flatMap((text) => extractPromptEntriesFromText(text));
-  });
-}
-
-function looseMetadataBuffers(buffer) {
-  if (buffer.length <= LOOSE_METADATA_SCAN_BYTES * 2) return [buffer];
-  return [
-    buffer.subarray(0, LOOSE_METADATA_SCAN_BYTES),
-    buffer.subarray(buffer.length - LOOSE_METADATA_SCAN_BYTES),
-  ];
-}
-
-function extractPromptEntriesFromText(text) {
-  const entries = [];
-  for (const key of ["Prompt", "prompt"]) {
-    let index = 0;
-    while ((index = text.indexOf(key, index)) >= 0) {
-      const jsonStart = text.indexOf("{", index + key.length);
-      if (jsonStart < 0) break;
-      const json = extractJsonObjectText(text, jsonStart);
-      if (json) entries.push([key, json]);
-      index = jsonStart + Math.max(1, json?.length || 1);
-    }
-  }
-  return entries;
-}
-
-function extractJsonObjectText(text, start) {
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = start; index < text.length; index += 1) {
-    const char = text[index];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-    if (char === "\"") inString = true;
-    if (char === "{") depth += 1;
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        const candidate = text.slice(start, index + 1);
-        try {
-          JSON.parse(candidate);
-          return candidate;
-        } catch {
-          return "";
-        }
-      }
-    }
-  }
-  return "";
 }
 
 function syncComfySockets() {
@@ -1093,16 +917,6 @@ async function handleApi(req, res, url) {
       })
     );
     return sendJson(res, 200, { statuses });
-  }
-
-  if (url.pathname === "/api/workflow/from-media" && req.method === "POST") {
-    const body = await readJson(req);
-    const { buffer, mimeType } = bufferFromDataUrl(body.dataUrl);
-    const workflow = workflowFromMetadata(buffer, {
-      name: body.name || "",
-      type: body.type || mimeType,
-    });
-    return sendJson(res, 200, { workflow });
   }
 
   if (url.pathname === "/api/submit" && req.method === "POST") {

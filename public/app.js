@@ -53,6 +53,8 @@ const state = {
   liveByPromptId: new Map(),
   jobCards: new Map(),
   mediaItems: [],
+  failedVideoSources: new Set(),
+  renderedGallerySignature: "",
   mediaPage: {
     limit: [10, 20, 30, 48].includes(defaultMediaLimit) ? defaultMediaLimit : 10,
     page: 1,
@@ -278,7 +280,7 @@ function renderInputs() {
   els.inputList.innerHTML = "";
   els.inputList.classList.toggle("empty-state", !inputs.length);
   if (!state.workflow) {
-    els.inputList.textContent = "Upload a ComfyUI API workflow JSON or media with Prompt metadata to find CLIPTextEncode, LoadImage, and primitive nodes.";
+    els.inputList.textContent = "Upload a ComfyUI API workflow JSON to find CLIPTextEncode, LoadImage, and primitive nodes.";
     return;
   }
   if (!inputs.length) {
@@ -788,33 +790,6 @@ function readFilePayload(file) {
   });
 }
 
-async function workflowFromFile(file) {
-  if (isJsonWorkflowFile(file)) {
-    return JSON.parse(await file.text());
-  }
-  const payload = await readFilePayload(file);
-  const data = await api("/api/workflow/from-media", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  return data.workflow;
-}
-
-function isJsonWorkflowFile(file) {
-  const name = file.name.toLowerCase();
-  return file.type === "application/json" || name.endsWith(".json");
-}
-
-function loadWorkflow(workflow) {
-  state.workflow = workflow;
-  state.inputs = extractInputs(state.workflow);
-  state.selectedInputs.clear();
-  state.hiddenInputIds.clear();
-  renderInputs();
-  updateVariantCount();
-  updateSubmitState();
-}
-
 async function submitJobs() {
   els.submitJobs.disabled = true;
   els.submitJobs.textContent = "Queueing...";
@@ -851,9 +826,13 @@ async function loadJobs() {
   }
 }
 
-async function loadMediaPage({ page = state.mediaPage.page } = {}) {
+async function loadMediaPage({ page = state.mediaPage.page, preserveActive = true } = {}) {
   if (state.mediaPage.loading) return;
   state.mediaPage.loading = true;
+  const previousIndex = state.activeMediaIndex;
+  const activeItemId = preserveActive
+    ? state.galleryItems[state.activeMediaIndex]?.id || state.mediaItems[state.activeMediaIndex]?.id
+    : "";
   renderGalleryFooter();
 
   try {
@@ -873,7 +852,12 @@ async function loadMediaPage({ page = state.mediaPage.page } = {}) {
       loading: false,
     };
     state.mediaItems = data.items || [];
-    state.activeMediaIndex = 0;
+    const activeIndex = activeItemId
+      ? state.mediaItems.findIndex((item) => item.id === activeItemId)
+      : -1;
+    state.activeMediaIndex = preserveActive
+      ? Math.max(0, activeIndex >= 0 ? activeIndex : Math.min(previousIndex, state.mediaItems.length - 1))
+      : 0;
   } catch (error) {
     state.mediaPage.loading = false;
     throw error;
@@ -999,8 +983,18 @@ function collectGalleryItems() {
   return state.mediaItems;
 }
 
+function gallerySignature(items) {
+  return `${state.galleryView}|${items.map((item) => item.id).join("|")}`;
+}
+
 function renderMediaGallery() {
   const items = collectGalleryItems();
+  const signature = gallerySignature(items);
+  if (signature === state.renderedGallerySignature) {
+    renderGalleryFooter();
+    return;
+  }
+  state.renderedGallerySignature = signature;
   state.galleryItems = items;
   const videoCount = items.filter((item) => item.kind === "video").length;
   els.downloadVideos.disabled = videoCount === 0;
@@ -1122,6 +1116,7 @@ function updateGalleryItem(node, item, index) {
 
   media.dataset.src = item.url;
   media.dataset.kind = item.kind;
+  media.dataset.mediaId = item.id;
   if (item.kind === "video") {
     media.title = item.filename;
   } else if (media.src !== item.url) {
@@ -1153,6 +1148,7 @@ function createMediaElement(item) {
   video.title = item.filename;
   video.dataset.kind = item.kind;
   video.dataset.src = item.url;
+  video.addEventListener("error", markVideoFailed);
   return video;
 }
 
@@ -1179,6 +1175,7 @@ function observeFeedVideos() {
       const item = video.closest(".gallery-item");
       const index = Number(item?.dataset.mediaIndex || 0);
       if (entry.isIntersecting && entry.intersectionRatio > 0.65) {
+        if (isFailedVideo(video)) continue;
         state.activeMediaIndex = index;
         hydrateVideo(video, "auto");
         updateVideoWindow();
@@ -1202,6 +1199,7 @@ function observeMediaHydration() {
       const video = entry.target;
       const item = video.closest(".gallery-item");
       const index = Number(item?.dataset.mediaIndex || 0);
+      if (isFailedVideo(video)) continue;
       if (entry.isIntersecting) {
         hydrateVideo(video, "metadata");
       } else if (state.galleryView === "feed" && Math.abs(index - state.activeMediaIndex) > 1) {
@@ -1223,6 +1221,7 @@ function updateVideoWindow() {
   for (const video of videos) {
     const index = Number(video.closest(".gallery-item")?.dataset.mediaIndex || 0);
     const distance = Math.abs(index - state.activeMediaIndex);
+    if (isFailedVideo(video)) continue;
     if (distance <= 1) {
       hydrateVideo(video, distance === 0 ? "auto" : "metadata");
     } else if (distance > 2) {
@@ -1234,6 +1233,7 @@ function updateVideoWindow() {
 function hydrateVideo(video, preload = "metadata") {
   const source = video.dataset.src;
   if (!source) return;
+  if (isFailedVideo(video)) return;
   video.preload = preload;
   if (video.getAttribute("src") === source) return;
   video.src = source;
@@ -1248,11 +1248,31 @@ function dehydrateVideo(video) {
   video.load();
 }
 
+function isFailedVideo(video) {
+  return state.failedVideoSources.has(videoSourceKey(video));
+}
+
+function markVideoFailed(event) {
+  const video = event.currentTarget;
+  const source = videoSourceKey(video);
+  if (!source) return;
+  state.failedVideoSources.add(source);
+  video.pause();
+  video.removeAttribute("src");
+  video.preload = "none";
+  video.load();
+}
+
+function videoSourceKey(video) {
+  const source = video.dataset.src || video.getAttribute("src") || video.currentSrc || "";
+  return source ? `${video.dataset.mediaId || ""}|${source}` : "";
+}
+
 function moveFeed(step) {
   if (state.galleryView !== "feed" || !state.galleryItems.length) return;
   const nextIndex = state.activeMediaIndex + step;
   if (nextIndex >= state.galleryItems.length && state.mediaPage.hasNext) {
-    loadMediaPage({ page: state.mediaPage.page + 1 }).then(() => {
+    loadMediaPage({ page: state.mediaPage.page + 1, preserveActive: false }).then(() => {
       renderMediaGallery();
       state.activeMediaIndex = 0;
       updateVideoWindow();
@@ -1261,7 +1281,7 @@ function moveFeed(step) {
     return;
   }
   if (nextIndex < 0 && state.mediaPage.hasPrevious) {
-    loadMediaPage({ page: state.mediaPage.page - 1 }).then(() => {
+    loadMediaPage({ page: state.mediaPage.page - 1, preserveActive: false }).then(() => {
       renderMediaGallery();
       state.activeMediaIndex = Math.max(0, state.galleryItems.length - 1);
       updateVideoWindow();
@@ -1312,7 +1332,7 @@ function downloadAllVideos() {
 
 function goToGalleryPage(page) {
   const nextPage = Math.max(1, Math.min(page, state.mediaPage.totalPages));
-  loadMediaPage({ page: nextPage }).then(renderMediaGallery).catch(console.warn);
+  loadMediaPage({ page: nextPage, preserveActive: false }).then(renderMediaGallery).catch(console.warn);
 }
 
 function setPanelVisibility(panel, visible) {
@@ -1382,12 +1402,17 @@ function escapeHtml(value) {
 els.workflowFile.addEventListener("change", async () => {
   const file = els.workflowFile.files[0];
   if (!file) return;
+  const text = await file.text();
   try {
-    loadWorkflow(await workflowFromFile(file));
+    state.workflow = JSON.parse(text);
+    state.inputs = extractInputs(state.workflow);
+    state.selectedInputs.clear();
+    state.hiddenInputIds.clear();
+    renderInputs();
+    updateVariantCount();
+    updateSubmitState();
   } catch (error) {
-    alert(`Workflow could not be loaded: ${error.message}`);
-  } finally {
-    els.workflowFile.value = "";
+    alert(`Workflow JSON could not be parsed: ${error.message}`);
   }
 });
 
