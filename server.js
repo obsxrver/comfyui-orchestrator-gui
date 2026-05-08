@@ -331,7 +331,7 @@ async function uploadInputImage(backend, image) {
 
   const mimeType = match[1] || image.type || "application/octet-stream";
   const bytes = Buffer.from(match[2], "base64");
-  const fileName = safeFileName(image.name || `input-${Date.now()}.png`);
+  const fileName = fileNameWithHashSuffix(image.name || `input-${Date.now()}.png`, bytes);
   const form = new FormData();
   form.append("image", new Blob([bytes], { type: mimeType }), fileName);
   form.append("type", "input");
@@ -352,6 +352,14 @@ async function uploadInputImage(backend, image) {
 
 function safeFileName(value) {
   return String(value).replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function fileNameWithHashSuffix(value, bytes) {
+  const safeName = safeFileName(value);
+  const parsed = path.parse(safeName);
+  const hashSuffix = crypto.createHash("sha256").update(bytes).digest("hex").slice(-6);
+  const baseName = parsed.name || "input";
+  return `${baseName}-${hashSuffix}${parsed.ext}`;
 }
 
 function publicAssignments(assignments) {
