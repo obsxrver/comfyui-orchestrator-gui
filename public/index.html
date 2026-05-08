@@ -53,8 +53,8 @@
       <section class="workspace">
         <header class="topbar">
           <label class="upload-zone">
-            <input id="workflowFile" type="file" accept=".json,application/json" />
-            <span>Upload workflow JSON</span>
+            <input id="workflowFile" type="file" accept=".json,application/json,image/*,video/*,.png,.webp,.jpg,.jpeg,.mp4,.webm,.mov,.mkv,.avi" />
+            <span>Upload JSON, photo, or video</span>
           </label>
           <div class="topbar-actions">
             <div class="segmented-control" aria-label="Workspace layout">
@@ -76,7 +76,7 @@
               </div>
             </div>
             <div id="inputList" class="input-list empty-state">
-              Upload a ComfyUI API workflow JSON to find CLIPTextEncode, LoadImage, primitive, and constant nodes.
+              Upload a ComfyUI API workflow JSON, or a photo/video with embedded API prompt metadata.
             </div>
           </div>
 

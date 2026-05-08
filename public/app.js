@@ -288,7 +288,7 @@ function renderInputs() {
   els.inputList.innerHTML = "";
   els.inputList.classList.toggle("empty-state", !inputs.length);
   if (!state.workflow) {
-    els.inputList.textContent = "Upload a ComfyUI API workflow JSON to find CLIPTextEncode, LoadImage, primitive, and constant nodes.";
+    els.inputList.textContent = "Upload a ComfyUI API workflow JSON, or a photo/video with embedded API prompt metadata.";
     return;
   }
   if (!inputs.length) {
@@ -1407,20 +1407,422 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+async function readWorkflowFromFile(file) {
+  const ext = file.name.split(".").pop()?.toLowerCase() || "";
+  if (ext === "json" || file.type === "application/json") {
+    return normalizeWorkflowPayload(await file.text(), file.name);
+  }
+
+  const buffer = await file.arrayBuffer();
+  const metadata = extractMediaMetadata(buffer, file);
+  const workflowPayload = pickWorkflowPayload(metadata) || findEmbeddedWorkflowPayload(new Uint8Array(buffer));
+  if (!workflowPayload) {
+    throw new Error("No ComfyUI workflow metadata was found in this file.");
+  }
+  return normalizeWorkflowPayload(workflowPayload, file.name);
+}
+
+function extractMediaMetadata(buffer, file) {
+  const ext = file.name.split(".").pop()?.toLowerCase() || "";
+  if (file.type === "image/png" || ext === "png") return extractPngMetadata(buffer);
+  if (file.type === "image/webp" || ext === "webp") return extractWebpMetadata(buffer);
+  if (file.type === "video/mp4" || ext === "mp4" || ext === "m4v") return extractMp4Metadata(buffer);
+  return {};
+}
+
+function pickWorkflowPayload(metadata) {
+  const orderedKeys = ["prompt", "Prompt", "workflow_api", "workflow", "Workflow"];
+  for (const key of orderedKeys) {
+    if (metadata[key]) return metadata[key];
+  }
+  return "";
+}
+
+function normalizeWorkflowPayload(payload, sourceName) {
+  const parsed = parseMaybeJson(payload);
+  const candidates = [
+    parsed?.prompt,
+    parsed?.Prompt,
+    parsed?.workflow_api,
+    parsed?.extra_data?.extra_pnginfo?.prompt,
+    parsed?.extra_data?.extra_pnginfo?.workflow,
+    parsed?.workflow,
+    parsed?.Workflow,
+    parsed,
+  ];
+
+  for (const candidate of candidates) {
+    const value = parseMaybeJson(candidate);
+    if (isComfyApiWorkflow(value)) return value;
+  }
+
+  const uiWorkflow = candidates.map(parseMaybeJson).find(isComfyUiWorkflow);
+  if (uiWorkflow) {
+    throw new Error(`${sourceName} contains a ComfyUI canvas workflow, but no API prompt metadata that can be queued.`);
+  }
+  throw new Error(`${sourceName} did not contain a queueable ComfyUI API workflow.`);
+}
+
+function parseMaybeJson(value) {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text) return value;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return value;
+  }
+}
+
+function isComfyApiWorkflow(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).some((node) =>
+    node && typeof node === "object" && !Array.isArray(node) && node.class_type && node.inputs
+  );
+}
+
+function isComfyUiWorkflow(value) {
+  return Boolean(value && typeof value === "object" && Array.isArray(value.nodes) && Array.isArray(value.links));
+}
+
+function loadWorkflow(workflow) {
+  state.workflow = workflow;
+  state.inputs = extractInputs(state.workflow);
+  state.selectedInputs.clear();
+  state.hiddenInputIds.clear();
+  renderInputs();
+  updateVariantCount();
+  updateSubmitState();
+}
+
+function extractPngMetadata(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  if (bytes.length < 8 || view.getUint32(0) !== 0x89504e47) return {};
+
+  const metadata = {};
+  let offset = 8;
+  while (offset + 12 <= bytes.length) {
+    const length = view.getUint32(offset);
+    const type = readAscii(bytes, offset + 4, 4);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > bytes.length) break;
+
+    if (type === "tEXt" || type === "comf") {
+      const data = bytes.slice(dataStart, dataEnd);
+      const zero = data.indexOf(0);
+      if (zero > -1) {
+        metadata[readLatin1(data, 0, zero)] = decodeUtf8(data.slice(zero + 1));
+      }
+    } else if (type === "iTXt") {
+      Object.assign(metadata, extractInternationalTextChunk(bytes.slice(dataStart, dataEnd)));
+    }
+
+    offset = dataEnd + 4;
+  }
+  return metadata;
+}
+
+function extractInternationalTextChunk(data) {
+  const metadata = {};
+  const keyEnd = data.indexOf(0);
+  if (keyEnd < 0 || keyEnd + 5 >= data.length) return metadata;
+  const keyword = readLatin1(data, 0, keyEnd);
+  const compressionFlag = data[keyEnd + 1];
+  if (compressionFlag) return metadata;
+
+  let offset = keyEnd + 3;
+  const languageEnd = data.indexOf(0, offset);
+  if (languageEnd < 0) return metadata;
+  offset = languageEnd + 1;
+  const translatedEnd = data.indexOf(0, offset);
+  if (translatedEnd < 0) return metadata;
+  metadata[keyword] = decodeUtf8(data.slice(translatedEnd + 1));
+  return metadata;
+}
+
+function extractWebpMetadata(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  if (bytes.length < 12 || readAscii(bytes, 0, 4) !== "RIFF" || readAscii(bytes, 8, 4) !== "WEBP") return {};
+
+  const metadata = {};
+  let offset = 12;
+  while (offset + 8 <= bytes.length) {
+    const type = readAscii(bytes, offset, 4);
+    const length = view.getUint32(offset + 4, true);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd > bytes.length) break;
+    if (type === "EXIF") {
+      Object.assign(metadata, extractTiffKeyValueMetadata(bytes.slice(dataStart, dataEnd)));
+    } else if (type === "XMP ") {
+      Object.assign(metadata, extractXmlLikeMetadata(decodeUtf8(bytes.slice(dataStart, dataEnd))));
+    }
+    offset = dataEnd + (length % 2);
+  }
+  return metadata;
+}
+
+function extractTiffKeyValueMetadata(data) {
+  const exifPrefix = "Exif\x00\x00";
+  const tiff = readAscii(data, 0, 6) === exifPrefix ? data.slice(6) : data;
+  if (tiff.length < 8) return {};
+
+  const view = new DataView(tiff.buffer, tiff.byteOffset, tiff.byteLength);
+  const littleEndian = readAscii(tiff, 0, 2) === "II";
+  const firstIfd = view.getUint32(4, littleEndian);
+  if (firstIfd + 2 > tiff.length) return {};
+
+  const metadata = {};
+  const entryCount = view.getUint16(firstIfd, littleEndian);
+  for (let index = 0; index < entryCount; index += 1) {
+    const entryOffset = firstIfd + 2 + index * 12;
+    if (entryOffset + 12 > tiff.length) break;
+    const type = view.getUint16(entryOffset + 2, littleEndian);
+    const count = view.getUint32(entryOffset + 4, littleEndian);
+    if (type !== 2 || count <= 1) continue;
+
+    const valueOffset = count <= 4 ? entryOffset + 8 : view.getUint32(entryOffset + 8, littleEndian);
+    if (valueOffset + count > tiff.length) continue;
+    const value = decodeUtf8(tiff.slice(valueOffset, valueOffset + count)).replace(/\0+$/, "");
+    const separator = value.indexOf(":");
+    if (separator > 0) metadata[value.slice(0, separator)] = value.slice(separator + 1);
+  }
+  return metadata;
+}
+
+function extractXmlLikeMetadata(text) {
+  const metadata = {};
+  for (const key of ["prompt", "workflow", "Workflow", "workflow_api"]) {
+    const match = text.match(new RegExp(`<[^>]*(?:${key})[^>]*>([\\s\\S]*?)<\\/[^>]+>`, "i"));
+    if (match) metadata[key] = htmlDecode(match[1].trim());
+  }
+  return metadata;
+}
+
+function extractMp4Metadata(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  if (bytes.length < 8 || readAscii(bytes, 4, 4) !== "ftyp") return {};
+  const metadata = {};
+  parseMp4Boxes(view, 0, bytes.length, metadata);
+  return metadata;
+}
+
+function parseMp4Boxes(view, start, end, metadata) {
+  let offset = start;
+  while (offset + 8 <= end) {
+    const box = readMp4Box(view, offset, end);
+    if (!box) break;
+    if (box.type === "moov") parseMp4Boxes(view, box.headerEnd, box.end, metadata);
+    if (box.type === "udta") parseMp4UserData(view, box.headerEnd, box.end, metadata);
+    if (box.type === "meta" && box.headerEnd + 4 <= box.end) parseMp4Meta(view, box.headerEnd + 4, box.end, metadata);
+    if (box.type === "uuid" && box.headerEnd + 16 <= box.end) parseMp4Uuid(view, box.headerEnd, box.end, metadata);
+    offset = box.end;
+  }
+}
+
+function parseMp4UserData(view, start, end, metadata) {
+  let offset = start;
+  while (offset + 8 <= end) {
+    const box = readMp4Box(view, offset, end);
+    if (!box) break;
+    if (box.type === "wflo" && box.headerEnd + 4 <= box.end) {
+      metadata.workflow = decodeViewUtf8(view, box.headerEnd + 4, box.end).trim();
+    }
+    if (box.type === "meta" && box.headerEnd + 4 <= box.end) parseMp4Meta(view, box.headerEnd + 4, box.end, metadata);
+    offset = box.end;
+  }
+}
+
+function parseMp4Meta(view, start, end, metadata) {
+  const keys = {};
+  let ilst = null;
+  let offset = start;
+  while (offset + 8 <= end) {
+    const box = readMp4Box(view, offset, end);
+    if (!box) break;
+    if (box.type === "keys" && box.headerEnd + 8 <= box.end) {
+      const count = view.getUint32(box.headerEnd + 4);
+      let keyOffset = box.headerEnd + 8;
+      for (let index = 1; index <= count && keyOffset + 8 <= box.end; index += 1) {
+        const keySize = view.getUint32(keyOffset);
+        if (keySize < 8 || keyOffset + keySize > box.end) break;
+        keys[index] = decodeViewUtf8(view, keyOffset + 8, keyOffset + keySize).trim();
+        keyOffset += keySize;
+      }
+    }
+    if (box.type === "ilst") ilst = box;
+    offset = box.end;
+  }
+  if (!ilst || !Object.keys(keys).length) return;
+
+  let itemOffset = ilst.headerEnd;
+  let itemIndex = 0;
+  while (itemOffset + 8 <= ilst.end) {
+    const item = readMp4Box(view, itemOffset, ilst.end);
+    if (!item) break;
+    itemIndex += 1;
+    const dataBox = readMp4Box(view, item.headerEnd, item.end);
+    if (dataBox?.type === "data" && dataBox.headerEnd + 8 <= dataBox.end) {
+      const dataType = view.getUint32(dataBox.headerEnd);
+      if (dataType === 1 && keys[itemIndex]) {
+        metadata[keys[itemIndex]] = decodeViewUtf8(view, dataBox.headerEnd + 8, dataBox.end).trim();
+      }
+    }
+    itemOffset = item.end;
+  }
+}
+
+function parseMp4Uuid(view, start, end, metadata) {
+  const uuid = decodeViewLatin1(view, start, start + 16);
+  if (uuid !== "comfyuiworkflow\0") return;
+  metadata.workflow = decodeViewUtf8(view, start + 16, end).trim();
+}
+
+function readMp4Box(view, offset, end) {
+  if (offset + 8 > end) return null;
+  let size = view.getUint32(offset);
+  const type = decodeViewLatin1(view, offset + 4, offset + 8);
+  let headerEnd = offset + 8;
+  if (size === 1 && offset + 16 <= end) {
+    const high = view.getUint32(offset + 8);
+    const low = view.getUint32(offset + 12);
+    if (high > 0) return null;
+    size = low;
+    headerEnd = offset + 16;
+  } else if (size === 0) {
+    size = end - offset;
+  }
+  if (size < headerEnd - offset || offset + size > end) return null;
+  return { type, start: offset, headerEnd, end: offset + size, size };
+}
+
+function findEmbeddedWorkflowPayload(bytes) {
+  const text = decodeUtf8(bytes);
+  for (const key of ["prompt", "workflow_api", "workflow", "Workflow"]) {
+    const value = findKeyedJsonPayload(text, key);
+    if (value) return value;
+  }
+  return "";
+}
+
+function findKeyedJsonPayload(text, key) {
+  const patterns = [`"${key}"`, key];
+  for (const pattern of patterns) {
+    let index = 0;
+    while ((index = text.indexOf(pattern, index)) !== -1) {
+      const colon = text.indexOf(":", index + pattern.length);
+      if (colon === -1 || colon - index > 80) {
+        index += pattern.length;
+        continue;
+      }
+      const start = skipWhitespace(text, colon + 1);
+      const parsed = readJsonLiteralAt(text, start);
+      if (parsed) return parsed;
+      index += pattern.length;
+    }
+  }
+  return "";
+}
+
+function readJsonLiteralAt(text, start) {
+  const first = text[start];
+  if (first === "{" || first === "[") return readBalancedJson(text, start);
+  if (first === '"') {
+    const literal = readQuotedJsonString(text, start);
+    if (!literal) return "";
+    try {
+      return JSON.parse(literal);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function readBalancedJson(text, start) {
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') inString = true;
+    if (char === "{" || char === "[") stack.push(char === "{" ? "}" : "]");
+    if (char === "}" || char === "]") {
+      if (stack.pop() !== char) return "";
+      if (!stack.length) return text.slice(start, index + 1);
+    }
+  }
+  return "";
+}
+
+function readQuotedJsonString(text, start) {
+  let escaped = false;
+  for (let index = start + 1; index < text.length; index += 1) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+    } else if (char === "\\") {
+      escaped = true;
+    } else if (char === '"') {
+      return text.slice(start, index + 1);
+    }
+  }
+  return "";
+}
+
+function skipWhitespace(text, start) {
+  let index = start;
+  while (/\s/.test(text[index] || "")) index += 1;
+  return index;
+}
+
+function readAscii(bytes, start, length) {
+  return readLatin1(bytes, start, start + length);
+}
+
+function readLatin1(bytes, start, end) {
+  return String.fromCharCode(...bytes.slice(start, end));
+}
+
+function decodeUtf8(bytes) {
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+function decodeViewUtf8(view, start, end) {
+  return decodeUtf8(new Uint8Array(view.buffer, view.byteOffset + start, end - start));
+}
+
+function decodeViewLatin1(view, start, end) {
+  return readLatin1(new Uint8Array(view.buffer, view.byteOffset + start, end - start), 0, end - start);
+}
+
+function htmlDecode(value) {
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = value;
+  return textarea.value;
+}
+
 els.workflowFile.addEventListener("change", async () => {
   const file = els.workflowFile.files[0];
   if (!file) return;
-  const text = await file.text();
   try {
-    state.workflow = JSON.parse(text);
-    state.inputs = extractInputs(state.workflow);
-    state.selectedInputs.clear();
-    state.hiddenInputIds.clear();
-    renderInputs();
-    updateVariantCount();
-    updateSubmitState();
+    loadWorkflow(await readWorkflowFromFile(file));
   } catch (error) {
-    alert(`Workflow JSON could not be parsed: ${error.message}`);
+    alert(`Workflow could not be loaded: ${error.message}`);
   }
 });
 
