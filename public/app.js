@@ -105,8 +105,6 @@ function extractInputs(workflow) {
     if (!node || typeof node !== "object" || !node.inputs) return [];
     const classType = node.class_type || "";
     const nodeTitle = node._meta?.title || classType || `Node ${nodeId}`;
-    const lowerClass = classType.toLowerCase();
-    const lowerTitle = nodeTitle.toLowerCase();
 
     if (classType === "CLIPTextEncode" && typeof node.inputs.text === "string") {
       return [makeInput({ nodeId, nodeTitle, classType, inputName: "text", kind: "text", value: node.inputs.text })];
@@ -116,7 +114,7 @@ function extractInputs(workflow) {
       return [makeInput({ nodeId, nodeTitle, classType, inputName: "image", kind: "image", value: node.inputs.image })];
     }
 
-    if (lowerClass.includes("primitive") || lowerTitle.includes("primitive")) {
+    if (isPrimitiveNode(classType, nodeTitle) || isDetectedConstantNode(classType)) {
       return Object.entries(node.inputs)
         .filter(([, value]) => !isLinkValue(value))
         .map(([inputName, value]) =>
@@ -126,6 +124,16 @@ function extractInputs(workflow) {
 
     return [];
   });
+}
+
+function isPrimitiveNode(classType, nodeTitle) {
+  const lowerClass = classType.toLowerCase();
+  const lowerTitle = nodeTitle.toLowerCase();
+  return lowerClass.includes("primitive") || lowerTitle.includes("primitive");
+}
+
+function isDetectedConstantNode(classType) {
+  return classType === "FloatConstant";
 }
 
 function makeInput({ nodeId, nodeTitle, classType, inputName, kind, value }) {
@@ -280,12 +288,12 @@ function renderInputs() {
   els.inputList.innerHTML = "";
   els.inputList.classList.toggle("empty-state", !inputs.length);
   if (!state.workflow) {
-    els.inputList.textContent = "Upload a ComfyUI API workflow JSON to find CLIPTextEncode, LoadImage, and primitive nodes.";
+    els.inputList.textContent = "Upload a ComfyUI API workflow JSON to find CLIPTextEncode, LoadImage, primitive, and constant nodes.";
     return;
   }
   if (!inputs.length) {
     els.inputList.textContent = visibleInputs.length
-      ? "No CLIPTextEncode, LoadImage, or primitive inputs matched."
+      ? "No CLIPTextEncode, LoadImage, primitive, or constant inputs matched."
       : "All workflow inputs are hidden.";
     return;
   }
