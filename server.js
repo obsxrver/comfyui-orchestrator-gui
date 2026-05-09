@@ -7,7 +7,7 @@ const { URL } = require("url");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 
-const PORT = Number(process.env.PORT || 4173);
+const PORT = Number(process.env.PORT || 8000);
 const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const MEDIA_DIR = path.join(__dirname, "media");

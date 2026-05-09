@@ -828,6 +828,20 @@ select:focus {
   padding: 9px 10px;
 }
 
+.gallery-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 32px;
+}
+
+.gallery-card-actions .ghost-button {
+  min-height: 30px;
+  width: auto;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .gallery-item figcaption strong,
 .gallery-item figcaption span {
   overflow: hidden;

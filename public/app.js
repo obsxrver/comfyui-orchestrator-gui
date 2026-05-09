@@ -1105,7 +1105,18 @@ function createGalleryItem() {
   mediaWrap.className = "gallery-media";
 
   const caption = document.createElement("figcaption");
-  caption.append(document.createElement("strong"), document.createElement("span"));
+  const title = document.createElement("strong");
+  const meta = document.createElement("span");
+  const actions = document.createElement("div");
+  actions.className = "gallery-card-actions";
+  const openWorkflow = document.createElement("button");
+  openWorkflow.className = "ghost-button open-workflow";
+  openWorkflow.type = "button";
+  openWorkflow.textContent = "Use workflow";
+  openWorkflow.title = "Use this video's embedded workflow";
+  openWorkflow.addEventListener("click", () => openGalleryVideoWorkflow(figure, openWorkflow));
+  actions.append(openWorkflow);
+  caption.append(title, meta, actions);
 
   figure.append(mediaWrap, caption);
   return figure;
@@ -1114,6 +1125,9 @@ function createGalleryItem() {
 function updateGalleryItem(node, item, index) {
   node.dataset.mediaIndex = String(index);
   node.dataset.mediaId = item.id;
+  node.dataset.mediaUrl = item.url;
+  node.dataset.filename = item.filename;
+  node.dataset.kind = item.kind;
   const mediaWrap = node.querySelector(".gallery-media");
   let media = mediaWrap.firstElementChild;
   if (!media || media.dataset.kind !== item.kind) {
@@ -1134,6 +1148,30 @@ function updateGalleryItem(node, item, index) {
 
   node.querySelector("figcaption strong").textContent = item.filename;
   node.querySelector("figcaption span").textContent = `${item.backendName} | ${item.kind}`;
+  node.querySelector(".open-workflow").hidden = item.kind !== "video";
+}
+
+async function openGalleryVideoWorkflow(card, button) {
+  const mediaUrl = card.dataset.mediaUrl;
+  const filename = card.dataset.filename || "workflow-video.mp4";
+  if (!mediaUrl) return;
+
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Opening...";
+  try {
+    const response = await fetch(mediaUrl);
+    if (!response.ok) throw new Error(`Could not read video: ${response.statusText}`);
+    const blob = await response.blob();
+    const file = new File([blob], filename, { type: blob.type || "video/mp4" });
+    loadWorkflow(await readWorkflowFromFile(file));
+    setPanelVisibility("inputs", true);
+  } catch (error) {
+    alert(`Workflow could not be loaded from this video: ${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 }
 
 function createMediaElement(item) {
