@@ -821,7 +821,7 @@ async function fetchVideoOutputs() {
 }
 
 async function refreshJob(job) {
-  if (job.status === "failed") return job;
+  if (["failed", "canceled"].includes(job.status)) return job;
   const backend = getBackend(job.backendId);
   if (!backend) {
     job.status = "failed";
@@ -858,6 +858,43 @@ async function refreshJob(job) {
   }
 
   return job;
+}
+
+function queueItemsContainPrompt(queueItems, promptId) {
+  return (queueItems || []).some((item) => {
+    if (Array.isArray(item)) return item.includes(promptId);
+    return item?.prompt_id === promptId || item?.promptId === promptId;
+  });
+}
+
+async function cancelJob(job) {
+  const backend = getBackend(job.backendId);
+  if (!backend) throw new Error("Backend no longer exists");
+  if (!job.promptId) throw new Error("Job does not have a ComfyUI prompt id");
+
+  const queue = await getComfyJson(backend, "/queue");
+  const wasRunning = queueItemsContainPrompt(queue.queue_running, job.promptId);
+  const wasPending = queueItemsContainPrompt(queue.queue_pending, job.promptId);
+
+  await comfyFetch(backend, "/queue", {
+    method: "POST",
+    body: JSON.stringify({ delete: [job.promptId] }),
+  });
+
+  if (wasRunning) {
+    await comfyFetch(backend, "/interrupt", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
+
+  job.status = "canceled";
+  job.error = "";
+  job.canceledAt = new Date().toISOString();
+  if (state.activePromptByBackend.get(backend.id) === job.promptId) {
+    state.activePromptByBackend.delete(backend.id);
+  }
+  return { job, wasRunning, wasPending };
 }
 
 async function handleApi(req, res, url) {
@@ -995,6 +1032,17 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/jobs" && req.method === "GET") {
     await Promise.all(state.jobs.slice(0, 100).map(refreshJob));
     return sendJson(res, 200, { jobs: state.jobs });
+  }
+
+  if (url.pathname === "/api/jobs/cancel" && req.method === "POST") {
+    const body = await readJson(req);
+    const promptId = String(body.promptId || "");
+    const id = String(body.id || "");
+    const job = state.jobs.find((item) => (promptId && item.promptId === promptId) || (id && item.id === id));
+    if (!job) return sendJson(res, 404, { error: "Job not found." });
+    if (["done", "failed", "canceled"].includes(job.status)) return sendJson(res, 200, { job, alreadyTerminal: true });
+    const result = await cancelJob(job);
+    return sendJson(res, 200, result);
   }
 
   if (url.pathname === "/api/media" && req.method === "GET") {

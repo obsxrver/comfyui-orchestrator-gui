@@ -52,6 +52,7 @@ const state = {
   activePromptByBackend: new Map(),
   liveByPromptId: new Map(),
   jobCards: new Map(),
+  cancelingJobKeys: new Set(),
   mediaItems: [],
   failedVideoSources: new Set(),
   renderedGallerySignature: "",
@@ -875,7 +876,7 @@ async function loadMediaPage({ page = state.mediaPage.page, preserveActive = tru
 }
 
 function mergeLiveJob(job) {
-  if (job.status === "done" && job.outputs?.length) {
+  if (job.status === "canceled" || (job.status === "done" && job.outputs?.length)) {
     state.liveByPromptId.delete(job.promptId);
     return job;
   }
@@ -884,7 +885,7 @@ function mergeLiveJob(job) {
 }
 
 function renderJobs() {
-  const jobs = state.jobs.filter((job) => !["done", "failed"].includes(job.status));
+  const jobs = state.jobs.filter((job) => !["done", "failed", "canceled"].includes(job.status));
   els.activeCount.textContent = String(jobs.length);
   renderMediaGallery();
   els.activeSummary.textContent = jobs.length
@@ -936,22 +937,57 @@ function createJobCard() {
     <div data-slot="progress"></div>
     <div data-slot="error"></div>
   `;
+  card.addEventListener("click", (event) => {
+    const button = event.target.closest(".cancel-job");
+    if (!button) return;
+    const job = state.jobs.find((item) => jobKey(item) === button.dataset.jobKey);
+    if (job) cancelJob(job);
+  });
   return card;
 }
 
 function updateJobCard(card, job) {
   const statusClass = job.status === "failed" ? " failed" : "";
+  const key = jobKey(job);
+  const isCanceling = state.cancelingJobKeys.has(key);
   card.querySelector('[data-slot="header"]').innerHTML = `
     <div class="job-header">
       <div>
         <strong>${escapeHtml(job.backendName || "Backend")}</strong>
         <div class="assignment">${escapeHtml(job.promptId || job.id)}</div>
       </div>
-      <span class="pill${statusClass}">${escapeHtml(job.status)}</span>
+      <div class="job-card-actions">
+        <span class="pill${statusClass}">${escapeHtml(isCanceling ? "canceling" : job.status)}</span>
+        <button class="cancel-job icon-button" type="button" title="Cancel job" aria-label="Cancel job" data-job-key="${escapeHtml(key)}" ${isCanceling ? "disabled" : ""}>x</button>
+      </div>
     </div>
   `;
   card.querySelector('[data-slot="progress"]').innerHTML = renderProgress(job);
   card.querySelector('[data-slot="error"]').innerHTML = job.error ? `<div class="error-text">${escapeHtml(job.error)}</div>` : "";
+}
+
+async function cancelJob(job) {
+  const key = jobKey(job);
+  if (state.cancelingJobKeys.has(key)) return;
+  state.cancelingJobKeys.add(key);
+  renderJobs();
+  try {
+    const data = await api("/api/jobs/cancel", {
+      method: "POST",
+      body: JSON.stringify({ id: job.id, promptId: job.promptId }),
+    });
+    state.liveByPromptId.delete(job.promptId);
+    state.activePromptByBackend.delete(job.backendId);
+    state.jobs = state.jobs.map((item) => (jobKey(item) === key ? data.job : item));
+    renderJobs();
+    loadJobs();
+    refreshStatuses();
+  } catch (error) {
+    alert(`Job could not be canceled: ${error.message}`);
+  } finally {
+    state.cancelingJobKeys.delete(key);
+    renderJobs();
+  }
 }
 
 function renderProgress(job) {

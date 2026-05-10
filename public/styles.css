@@ -628,6 +628,17 @@ select:focus {
   justify-content: space-between;
 }
 
+.job-header > div:first-child {
+  min-width: 0;
+}
+
+.job-card-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .pill {
   border-radius: 999px;
   padding: 5px 9px;
@@ -640,6 +651,22 @@ select:focus {
 .pill.failed {
   background: #3a2324;
   color: var(--danger);
+}
+
+.cancel-job {
+  width: 30px;
+  min-height: 30px;
+  border-color: #4d3030;
+  background: #26191c;
+  color: var(--danger);
+  font-size: 16px;
+  font-weight: 780;
+}
+
+.cancel-job:hover:not(:disabled),
+.cancel-job:focus-visible {
+  border-color: var(--danger);
+  background: #3a2324;
 }
 
 .assignments {
