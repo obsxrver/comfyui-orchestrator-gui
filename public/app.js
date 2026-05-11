@@ -149,12 +149,16 @@ function makeInput({ nodeId, nodeTitle, classType, inputName, kind, value }) {
     value,
     valueType: kind === "primitive" ? primitive.valueType : valueType(value),
     controlType: kind === "primitive" ? primitive.controlType : kind === "text" ? "multiline" : "image",
+    step: primitive.step,
     preview: previewValue(value),
   };
 }
 
 function primitiveDescriptor(classType, value) {
   const lower = classType.toLowerCase();
+  if (classType === "FloatConstant") {
+    return { valueType: "float", controlType: "float", step: "0.01" };
+  }
   if (lower.includes("stringmultiline") || lower.includes("multiline")) {
     return { valueType: "string", controlType: "multiline" };
   }
@@ -493,7 +497,7 @@ function addScalarRow(container, input, value, disabled) {
     control.checked = value === true || value === "true";
   } else if (input.controlType === "int" || input.controlType === "float") {
     control.type = "number";
-    control.step = input.controlType === "int" ? "1" : "any";
+    control.step = input.step || (input.controlType === "int" ? "1" : "any");
     control.value = value ?? "";
   } else {
     control.type = "text";
