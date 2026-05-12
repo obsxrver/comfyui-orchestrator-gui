@@ -1,4 +1,7 @@
 const els = {
+  workflowDropOverlay: document.querySelector("#workflowDropOverlay"),
+  workflowDropTitle: document.querySelector("#workflowDropTitle"),
+  workflowDropHint: document.querySelector("#workflowDropHint"),
   workflowFile: document.querySelector("#workflowFile"),
   inputList: document.querySelector("#inputList"),
   inputFilter: document.querySelector("#inputFilter"),
@@ -77,6 +80,7 @@ const state = {
     inputsVisible: localStorage.getItem("inputsPanelVisible") !== "false",
     galleryVisible: localStorage.getItem("galleryPanelVisible") !== "false",
   },
+  workflowDropDepth: 0,
 };
 
 if (!state.layout.inputsVisible && !state.layout.galleryVisible) {
@@ -565,18 +569,34 @@ function bindImageDrop(dropZone, input, previewList) {
   for (const eventName of ["dragenter", "dragover"]) {
     dropZone.addEventListener(eventName, (event) => {
       event.preventDefault();
+      event.stopPropagation();
       dropZone.classList.add("drag-over");
     });
   }
 
-  for (const eventName of ["dragleave", "drop"]) {
-    dropZone.addEventListener(eventName, () => dropZone.classList.remove("drag-over"));
-  }
+  dropZone.addEventListener("dragleave", (event) => {
+    event.stopPropagation();
+    dropZone.classList.remove("drag-over");
+  });
+
+  dropZone.addEventListener("drop", (event) => {
+    dropZone.classList.remove("drag-over");
+  });
 
   dropZone.addEventListener("drop", (event) => {
     event.preventDefault();
-    const imageFiles = [...event.dataTransfer.files].filter((file) => file.type.startsWith("image/"));
-    if (!imageFiles.length) return;
+    const files = Array.from(event.dataTransfer.files || []);
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (!imageFiles.length) {
+      event.stopPropagation();
+      const [file] = files;
+      if (file) {
+        setWorkflowDropOverlay(true, true);
+        loadWorkflowFile(file, { errorPrefix: "Dropped workflow could not be loaded" });
+      }
+      return;
+    }
+    event.stopPropagation();
     state.selectedInputs.set(input.id, {
       nodeId: input.nodeId,
       nodeTitle: input.nodeTitle,
@@ -1573,6 +1593,73 @@ function loadWorkflow(workflow) {
   updateSubmitState();
 }
 
+async function loadWorkflowFile(file, { errorPrefix = "Workflow could not be loaded" } = {}) {
+  if (!file) return;
+  try {
+    loadWorkflow(await readWorkflowFromFile(file));
+  } catch (error) {
+    alert(`${errorPrefix}: ${error.message}`);
+  } finally {
+    setWorkflowDropOverlay(false);
+    if (els.workflowFile) els.workflowFile.value = "";
+  }
+}
+
+function hasDraggedFiles(event) {
+  return Array.from(event.dataTransfer?.types || []).includes("Files");
+}
+
+function isInsideImagePicker(event) {
+  return event.target instanceof Element && Boolean(event.target.closest(".image-picker"));
+}
+
+function setWorkflowDropOverlay(visible, loading = false) {
+  document.body.classList.toggle("workflow-drag-over", visible);
+  document.body.classList.toggle("workflow-drop-loading", loading);
+  if (els.workflowDropOverlay) els.workflowDropOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
+  if (els.workflowDropTitle) els.workflowDropTitle.textContent = loading ? "Loading workflow..." : "Drop workflow to load";
+  if (els.workflowDropHint) {
+    els.workflowDropHint.textContent = loading
+      ? "Reading embedded ComfyUI metadata"
+      : "JSON, image, or video with embedded ComfyUI metadata";
+  }
+}
+
+function bindWindowWorkflowDrop() {
+  window.addEventListener("dragenter", (event) => {
+    if (!hasDraggedFiles(event) || isInsideImagePicker(event)) return;
+    event.preventDefault();
+    state.workflowDropDepth += 1;
+    setWorkflowDropOverlay(true);
+  });
+
+  window.addEventListener("dragover", (event) => {
+    if (!hasDraggedFiles(event) || isInsideImagePicker(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setWorkflowDropOverlay(true);
+  });
+
+  window.addEventListener("dragleave", (event) => {
+    if (!hasDraggedFiles(event) || isInsideImagePicker(event)) return;
+    state.workflowDropDepth = Math.max(0, state.workflowDropDepth - 1);
+    if (state.workflowDropDepth === 0) setWorkflowDropOverlay(false);
+  });
+
+  window.addEventListener("drop", (event) => {
+    if (!hasDraggedFiles(event) || isInsideImagePicker(event)) return;
+    event.preventDefault();
+    state.workflowDropDepth = 0;
+    const [file] = Array.from(event.dataTransfer.files || []);
+    if (!file) {
+      setWorkflowDropOverlay(false);
+      return;
+    }
+    setWorkflowDropOverlay(true, true);
+    loadWorkflowFile(file, { errorPrefix: "Dropped workflow could not be loaded" });
+  });
+}
+
 function extractPngMetadata(buffer) {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
@@ -1896,12 +1983,7 @@ function htmlDecode(value) {
 
 els.workflowFile.addEventListener("change", async () => {
   const file = els.workflowFile.files[0];
-  if (!file) return;
-  try {
-    loadWorkflow(await readWorkflowFromFile(file));
-  } catch (error) {
-    alert(`Workflow could not be loaded: ${error.message}`);
-  }
+  loadWorkflowFile(file);
 });
 
 els.inputFilter.addEventListener("input", renderInputs);
@@ -1947,6 +2029,7 @@ els.itemsPerPage.addEventListener("change", () => {
 });
 els.mediaGallery.addEventListener("scroll", handleGalleryScroll);
 els.downloadVideos.addEventListener("click", downloadAllVideos);
+bindWindowWorkflowDrop();
 els.toggleInputsPanel.addEventListener("click", () => setPanelVisibility("inputs", !state.layout.inputsVisible));
 els.toggleGalleryPanel.addEventListener("click", () => setPanelVisibility("gallery", !state.layout.galleryVisible));
 els.hideInputsPanel.addEventListener("click", () => setPanelVisibility("inputs", false));
