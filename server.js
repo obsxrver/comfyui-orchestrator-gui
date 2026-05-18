@@ -38,6 +38,7 @@ const mimeTypes = {
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -198,6 +199,20 @@ function makeVariantPrompt(workflow, assignments) {
     const node = prompt[assignment.nodeId];
     if (!node || !node.inputs) continue;
     node.inputs[assignment.inputName] = coerceValue(assignment.value, assignment.valueType);
+  }
+  uniquifyOutputFilenamePrefixes(prompt);
+  return prompt;
+}
+
+function uniquifyOutputFilenamePrefixes(prompt, uniqueId = crypto.randomUUID()) {
+  const suffix = safeFileName(uniqueId).slice(0, 2);
+  for (const node of Object.values(prompt || {})) {
+    if (!node || typeof node !== "object") continue;
+    if (!["SaveImage", "SaveVideo"].includes(node.class_type)) continue;
+    if (!node.inputs || typeof node.inputs.filename_prefix !== "string") continue;
+
+    const prefix = node.inputs.filename_prefix;
+    node.inputs.filename_prefix = prefix ? `${prefix}_${suffix}` : suffix;
   }
   return prompt;
 }
@@ -677,7 +692,8 @@ function localMediaName(job, output, index) {
   const parsed = path.parse(safeFileName(output.filename || `output-${index}`));
   const ext = parsed.ext || (output.kind === "video" ? ".mp4" : ".png");
   const base = parsed.name || output.kind || "output";
-  return `${safeFileName(job.promptId || job.id || "job")}-${index}-${base}${ext}`;
+  const jobToken = safeFileName(job.promptId || job.id || "job").slice(0, 8) || "job";
+  return `${base}-${index}-${jobToken}${ext}`;
 }
 
 async function cacheJobOutputs(job, backend) {

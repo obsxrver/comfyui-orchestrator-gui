@@ -320,6 +320,21 @@ select:focus {
   font-weight: 700;
 }
 
+.workflow-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.favorite-workflow-select {
+  width: min(220px, 28vw);
+  min-height: 44px;
+  padding-right: 34px;
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
 .upload-zone input {
   display: none;
 }
@@ -394,6 +409,33 @@ select:focus {
   gap: 8px;
   align-items: center;
   justify-content: flex-end;
+}
+
+.input-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.favorite-workflow-button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  min-height: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 0;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 21px;
+  line-height: 1;
+}
+
+.favorite-workflow-button.is-favorite {
+  border-color: var(--warning);
+  background: #302414;
+  color: #ffd083;
 }
 
 .empty-state {
@@ -1015,7 +1057,9 @@ select:focus {
   }
 
   .topbar .primary-button,
+  .workflow-picker,
   .upload-zone,
+  .favorite-workflow-select,
   .topbar-actions,
   .topbar .segmented-control {
     width: 100%;

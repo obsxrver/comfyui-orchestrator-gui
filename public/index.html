@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ComfyUI Multi GPU Orchestrator</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico"/>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -58,10 +59,15 @@
 
       <section class="workspace">
         <header class="topbar">
-          <label class="upload-zone">
-            <input id="workflowFile" type="file" accept=".json,application/json,image/*,video/*,.png,.webp,.jpg,.jpeg,.mp4,.webm,.mov,.mkv,.avi" />
-            <span>Upload JSON, photo, or video</span>
-          </label>
+          <div class="workflow-picker">
+            <label class="upload-zone">
+              <input id="workflowFile" type="file" accept=".json,application/json,image/*,video/*,.png,.webp,.jpg,.jpeg,.mp4,.webm,.mov,.mkv,.avi" />
+              <span>Upload JSON, photo, or video</span>
+            </label>
+            <select id="favoriteWorkflowSelect" class="favorite-workflow-select" aria-label="Saved workflows">
+              <option value="">Saved workflows</option>
+            </select>
+          </div>
           <div class="topbar-actions">
             <div class="segmented-control" aria-label="Workspace layout">
               <button id="toggleInputsPanel" class="segmented-button active" type="button">Inputs</button>
@@ -74,7 +80,10 @@
         <section class="editor-grid">
           <div class="panel workflow-panel">
             <div class="panel-heading">
-              <h2>Workflow Inputs</h2>
+              <div class="input-heading">
+                <h2>Workflow Inputs</h2>
+                <button id="favoriteWorkflow" class="favorite-workflow-button" type="button" title="Add current workflow to favorites" aria-label="Add current workflow to favorites" disabled>&#9734;</button>
+              </div>
               <div class="input-tools">
                 <button id="showHiddenInputs" class="ghost-button" type="button" hidden>Unhide all</button>
                 <button id="hideInputsPanel" class="ghost-button" type="button">Hide inputs</button>

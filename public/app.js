@@ -3,6 +3,8 @@ const els = {
   workflowDropTitle: document.querySelector("#workflowDropTitle"),
   workflowDropHint: document.querySelector("#workflowDropHint"),
   workflowFile: document.querySelector("#workflowFile"),
+  favoriteWorkflowSelect: document.querySelector("#favoriteWorkflowSelect"),
+  favoriteWorkflow: document.querySelector("#favoriteWorkflow"),
   inputList: document.querySelector("#inputList"),
   inputFilter: document.querySelector("#inputFilter"),
   showHiddenInputs: document.querySelector("#showHiddenInputs"),
@@ -40,9 +42,13 @@ const els = {
 };
 
 const defaultMediaLimit = Number(localStorage.getItem("galleryItemsPerPage")) || 10;
+const workflowFavoritesKey = "favoriteWorkflows";
 
 const state = {
   workflow: null,
+  workflowSourceName: "",
+  activeWorkflowFavoriteId: "",
+  favoriteWorkflows: readFavoriteWorkflows(),
   inputs: [],
   selectedInputs: new Map(),
   hiddenInputIds: new Set(),
@@ -99,6 +105,131 @@ function api(path, options = {}) {
     if (!response.ok) throw new Error(data.error || response.statusText);
     return data;
   });
+}
+
+function readFavoriteWorkflows() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(workflowFavoritesKey) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item) => item && typeof item === "object" && isComfyApiWorkflow(item.workflow))
+      .map((item) => ({
+        id: item.id || favoriteIdForWorkflow(item.workflow),
+        name: String(item.name || "Untitled workflow").trim() || "Untitled workflow",
+        workflow: item.workflow,
+        createdAt: item.createdAt || new Date().toISOString(),
+        updatedAt: item.updatedAt || item.createdAt || new Date().toISOString(),
+      }))
+      .sort(compareFavoritesByName);
+  } catch {
+    return [];
+  }
+}
+
+function writeFavoriteWorkflows() {
+  localStorage.setItem(workflowFavoritesKey, JSON.stringify(state.favoriteWorkflows));
+}
+
+function compareFavoritesByName(left, right) {
+  return left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true });
+}
+
+function renderFavoriteWorkflows() {
+  if (!els.favoriteWorkflowSelect) return;
+  const currentValue = els.favoriteWorkflowSelect.value;
+  els.favoriteWorkflowSelect.innerHTML = `<option value="">Saved workflows</option>`;
+  for (const favorite of state.favoriteWorkflows) {
+    const option = document.createElement("option");
+    option.value = favorite.id;
+    option.textContent = favorite.name;
+    els.favoriteWorkflowSelect.append(option);
+  }
+  els.favoriteWorkflowSelect.disabled = state.favoriteWorkflows.length === 0;
+  els.favoriteWorkflowSelect.value = state.favoriteWorkflows.some((favorite) => favorite.id === currentValue)
+    ? currentValue
+    : "";
+}
+
+function updateFavoriteControls() {
+  state.activeWorkflowFavoriteId = state.workflow ? favoriteIdForWorkflow(state.workflow) : "";
+  const isFavorite = state.favoriteWorkflows.some((favorite) => favorite.id === state.activeWorkflowFavoriteId);
+  if (els.favoriteWorkflow) {
+    els.favoriteWorkflow.disabled = !state.workflow;
+    els.favoriteWorkflow.classList.toggle("is-favorite", isFavorite);
+    els.favoriteWorkflow.textContent = isFavorite ? "\u2605" : "\u2606";
+    els.favoriteWorkflow.title = isFavorite ? "Rename this favorite workflow" : "Add current workflow to favorites";
+    els.favoriteWorkflow.setAttribute("aria-label", els.favoriteWorkflow.title);
+  }
+}
+
+function favoriteIdForWorkflow(workflow) {
+  const serialized = stableStringify(workflow);
+  return `workflow-${hashString(serialized)}-${serialized.length.toString(36)}`;
+}
+
+function stableStringify(value) {
+  if (!value || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function defaultFavoriteWorkflowName() {
+  const sourceName = state.workflowSourceName || "";
+  const sourceBase = sourceName.replace(/\.[a-z0-9]+$/i, "").trim();
+  if (sourceBase && !/^workflow[-_ ]?\d*$/i.test(sourceBase)) return sourceBase;
+  return `Workflow ${new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
+}
+
+function saveCurrentWorkflowFavorite() {
+  if (!state.workflow) return;
+  const id = favoriteIdForWorkflow(state.workflow);
+  const existing = state.favoriteWorkflows.find((favorite) => favorite.id === id);
+  const name = window.prompt(
+    existing ? "Favorite workflow name" : "Save workflow as",
+    existing?.name || defaultFavoriteWorkflowName()
+  );
+  if (name === null) return;
+
+  const trimmedName = name.trim();
+  if (!trimmedName) return;
+
+  const now = new Date().toISOString();
+  const favorite = {
+    id,
+    name: trimmedName,
+    workflow: structuredClone(state.workflow),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+  state.favoriteWorkflows = [
+    ...state.favoriteWorkflows.filter((item) => item.id !== id),
+    favorite,
+  ].sort(compareFavoritesByName);
+
+  try {
+    writeFavoriteWorkflows();
+    renderFavoriteWorkflows();
+    updateFavoriteControls();
+  } catch (error) {
+    alert(`Workflow could not be saved: ${error.message}`);
+  }
+}
+
+function loadFavoriteWorkflow(favoriteId) {
+  const favorite = state.favoriteWorkflows.find((item) => item.id === favoriteId);
+  if (!favorite) return;
+  loadWorkflow(structuredClone(favorite.workflow), favorite.name);
+  setPanelVisibility("inputs", true);
+  els.favoriteWorkflowSelect.value = "";
 }
 
 function isLinkValue(value) {
@@ -1224,7 +1355,7 @@ async function openGalleryVideoWorkflow(card, button) {
     if (!response.ok) throw new Error(`Could not read video: ${response.statusText}`);
     const blob = await response.blob();
     const file = new File([blob], filename, { type: blob.type || "video/mp4" });
-    loadWorkflow(await readWorkflowFromFile(file));
+    loadWorkflow(await readWorkflowFromFile(file), filename);
     setPanelVisibility("inputs", true);
   } catch (error) {
     alert(`Workflow could not be loaded from this video: ${error.message}`);
@@ -1583,20 +1714,22 @@ function isComfyUiWorkflow(value) {
   return Boolean(value && typeof value === "object" && Array.isArray(value.nodes) && Array.isArray(value.links));
 }
 
-function loadWorkflow(workflow) {
+function loadWorkflow(workflow, sourceName = "") {
   state.workflow = workflow;
+  state.workflowSourceName = sourceName;
   state.inputs = extractInputs(state.workflow);
   state.selectedInputs.clear();
   state.hiddenInputIds.clear();
   renderInputs();
   updateVariantCount();
   updateSubmitState();
+  updateFavoriteControls();
 }
 
 async function loadWorkflowFile(file, { errorPrefix = "Workflow could not be loaded" } = {}) {
   if (!file) return;
   try {
-    loadWorkflow(await readWorkflowFromFile(file));
+    loadWorkflow(await readWorkflowFromFile(file), file.name);
   } catch (error) {
     alert(`${errorPrefix}: ${error.message}`);
   } finally {
@@ -1985,6 +2118,10 @@ els.workflowFile.addEventListener("change", async () => {
   const file = els.workflowFile.files[0];
   loadWorkflowFile(file);
 });
+els.favoriteWorkflowSelect.addEventListener("change", () => {
+  loadFavoriteWorkflow(els.favoriteWorkflowSelect.value);
+});
+els.favoriteWorkflow.addEventListener("click", saveCurrentWorkflowFavorite);
 
 els.inputFilter.addEventListener("input", renderInputs);
 els.showHiddenInputs.addEventListener("click", () => {
@@ -2050,6 +2187,8 @@ window.addEventListener("keydown", (event) => {
 
 restoreColumnWidth();
 renderLayoutState();
+renderFavoriteWorkflows();
+updateFavoriteControls();
 loadBackends();
 loadClientId();
 detectGpus();
