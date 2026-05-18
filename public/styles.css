@@ -178,7 +178,8 @@ h3 {
 .panel-heading,
 .topbar,
 .player-actions,
-.backend-tools {
+.backend-tools,
+.backend-heading-actions {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -193,6 +194,15 @@ h3 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   margin-bottom: 10px;
+}
+
+.backend-heading-actions {
+  justify-content: flex-end;
+}
+
+.collapse-button {
+  min-height: 34px;
+  padding: 0 10px;
 }
 
 .gpu-summary {

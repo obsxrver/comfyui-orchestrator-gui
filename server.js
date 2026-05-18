@@ -11,13 +11,18 @@ const PORT = Number(process.env.PORT || 7000);
 const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const MEDIA_DIR = path.join(__dirname, "media");
+const CONFIG_DIR = path.join(__dirname, "config");
+const BACKENDS_FILE = path.join(CONFIG_DIR, "backends.json");
 const CLIENT_ID = process.env.CLIENT_ID || `orchestrator-${Math.random().toString(36).slice(2)}`;
 const execFileAsync = promisify(execFile);
 
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
+fs.mkdirSync(CONFIG_DIR, { recursive: true });
+
+const envBackends = parseBackends(process.env.COMFY_BACKENDS || "");
 
 const state = {
-  backends: parseBackends(process.env.COMFY_BACKENDS || ""),
+  backends: envBackends.length ? envBackends : readStoredBackends(),
   jobs: [],
   eventClients: new Set(),
   comfySockets: new Map(),
@@ -71,6 +76,22 @@ function parseBackends(value) {
       });
     })
     .filter((backend) => backend.url);
+}
+
+function readStoredBackends() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(BACKENDS_FILE, "utf8"));
+    if (!Array.isArray(parsed.backends)) return [];
+    return parsed.backends.map(normalizeBackend).filter((backend) => backend.url);
+  } catch (error) {
+    if (error.code !== "ENOENT") console.warn(`Could not read saved backends: ${error.message}`);
+    return [];
+  }
+}
+
+function writeStoredBackends() {
+  const payload = JSON.stringify({ backends: state.backends }, null, 2);
+  fs.writeFileSync(BACKENDS_FILE, `${payload}\n`);
 }
 
 function normalizeBackend(backend) {
@@ -949,6 +970,7 @@ async function handleApi(req, res, url) {
         url: `http://localhost:${startPort + index}`,
       });
     });
+    writeStoredBackends();
     syncComfySockets();
     return sendJson(res, 200, { backends: state.backends, gpus: detected });
   }
@@ -961,6 +983,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/backends" && req.method === "POST") {
     const body = await readJson(req);
     state.backends = (body.backends || []).map(normalizeBackend).filter((backend) => backend.url);
+    writeStoredBackends();
     syncComfySockets();
     return sendJson(res, 200, { backends: state.backends });
   }

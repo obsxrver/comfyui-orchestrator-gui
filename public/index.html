@@ -27,15 +27,20 @@
         <section class="panel">
           <div class="panel-heading">
             <h2>Backends</h2>
-            <button id="addBackend" class="icon-button" title="Add backend">+</button>
+            <div class="backend-heading-actions">
+              <button id="toggleBackends" class="ghost-button collapse-button" type="button" aria-expanded="true">Hide</button>
+              <button id="addBackend" class="icon-button" title="Add backend">+</button>
+            </div>
           </div>
-          <div class="backend-tools">
-            <button id="detectGpus" class="ghost-button">Detect CUDA</button>
-            <button id="autoBackends" class="ghost-button">Use localhost:8189+</button>
+          <div id="backendPanelBody" class="backend-panel-body">
+            <div class="backend-tools">
+              <button id="detectGpus" class="ghost-button">Detect CUDA</button>
+              <button id="autoBackends" class="ghost-button">Use localhost:8189+</button>
+            </div>
+            <div id="gpuSummary" class="gpu-summary">CUDA devices not detected yet.</div>
+            <div id="backendList" class="backend-list"></div>
+            <button id="saveBackends" class="primary-button">Save backends</button>
           </div>
-          <div id="gpuSummary" class="gpu-summary">CUDA devices not detected yet.</div>
-          <div id="backendList" class="backend-list"></div>
-          <button id="saveBackends" class="primary-button">Save backends</button>
         </section>
 
         <section class="panel compact">

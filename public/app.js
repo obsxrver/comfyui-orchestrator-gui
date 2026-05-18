@@ -11,6 +11,8 @@ const els = {
   inputFilter: document.querySelector("#inputFilter"),
   showHiddenInputs: document.querySelector("#showHiddenInputs"),
   backendList: document.querySelector("#backendList"),
+  backendPanelBody: document.querySelector("#backendPanelBody"),
+  toggleBackends: document.querySelector("#toggleBackends"),
   addBackend: document.querySelector("#addBackend"),
   saveBackends: document.querySelector("#saveBackends"),
   detectGpus: document.querySelector("#detectGpus"),
@@ -45,6 +47,7 @@ const els = {
 
 const defaultMediaLimit = Number(localStorage.getItem("galleryItemsPerPage")) || 10;
 const workflowFavoritesKey = "favoriteWorkflows";
+const backendPanelCollapsedKey = "backendPanelCollapsed";
 
 const state = {
   workflow: null,
@@ -87,6 +90,7 @@ const state = {
   layout: {
     inputsVisible: localStorage.getItem("inputsPanelVisible") !== "false",
     galleryVisible: localStorage.getItem("galleryPanelVisible") !== "false",
+    backendsCollapsed: localStorage.getItem(backendPanelCollapsedKey) === "true",
   },
   workflowDropDepth: 0,
 };
@@ -435,6 +439,22 @@ function renderBackends() {
     });
     els.backendList.append(node);
   }
+}
+
+function renderBackendPanelState() {
+  const collapsed = state.layout.backendsCollapsed;
+  if (els.backendPanelBody) els.backendPanelBody.hidden = collapsed;
+  if (els.toggleBackends) {
+    els.toggleBackends.textContent = collapsed ? "Show" : "Hide";
+    els.toggleBackends.setAttribute("aria-expanded", String(!collapsed));
+    els.toggleBackends.title = collapsed ? "Show backends" : "Hide backends";
+  }
+}
+
+function setBackendPanelCollapsed(collapsed) {
+  state.layout.backendsCollapsed = collapsed;
+  localStorage.setItem(backendPanelCollapsedKey, String(collapsed));
+  renderBackendPanelState();
 }
 
 function summarizeBackend(status) {
@@ -1215,7 +1235,10 @@ async function cancelJob(job) {
     loadJobs();
     refreshStatuses();
   } catch (error) {
-    alert(`Job could not be canceled: ${error.message}`);
+    console.warn(`Job could not be canceled; removing it from the active list.`, error);
+    state.liveByPromptId.delete(job.promptId);
+    state.activePromptByBackend.delete(job.backendId);
+    state.jobs = state.jobs.filter((item) => jobKey(item) !== key);
   } finally {
     state.cancelingJobKeys.delete(key);
     renderJobs();
@@ -2218,6 +2241,7 @@ els.addBackend.addEventListener("click", () => {
   renderBackends();
   connectBackendSockets();
 });
+els.toggleBackends.addEventListener("click", () => setBackendPanelCollapsed(!state.layout.backendsCollapsed));
 els.saveBackends.addEventListener("click", saveBackends);
 els.detectGpus.addEventListener("click", detectGpus);
 els.autoBackends.addEventListener("click", autoCreateBackends);
@@ -2267,6 +2291,7 @@ window.addEventListener("keydown", (event) => {
 
 restoreColumnWidth();
 renderLayoutState();
+renderBackendPanelState();
 renderFavoriteWorkflows();
 updateFavoriteControls();
 loadBackends();
