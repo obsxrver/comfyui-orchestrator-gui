@@ -337,22 +337,112 @@ select:focus {
   min-width: 0;
 }
 
-.favorite-workflow-select {
-  width: min(220px, 28vw);
+.favorite-workflow-picker {
+  position: relative;
+  width: min(300px, 34vw);
+  min-width: 220px;
+}
+
+.favorite-workflow-menu-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
   min-height: 44px;
-  padding-right: 34px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 11px;
+  background: #101319;
   color: var(--accent-strong);
   font-weight: 700;
 }
 
-.saved-workflow-action {
-  min-height: 44px;
-  padding: 0 12px;
+.favorite-workflow-menu-button span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.menu-caret {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.favorite-workflow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: grid;
+  gap: 4px;
+  width: min(360px, 78vw);
+  max-height: min(360px, 70vh);
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 6px;
+  background: #101319;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.34);
+}
+
+.favorite-workflow-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px 34px;
+  gap: 4px;
+  align-items: center;
+}
+
+.favorite-workflow-load,
+.favorite-workflow-icon {
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+}
+
+.favorite-workflow-load {
+  min-width: 0;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.favorite-workflow-load span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.favorite-workflow-icon {
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.favorite-workflow-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.favorite-workflow-load:hover,
+.favorite-workflow-load:focus-visible,
+.favorite-workflow-icon:hover,
+.favorite-workflow-icon:focus-visible,
+.favorite-workflow-row[aria-selected="true"] .favorite-workflow-load {
+  border-color: var(--line-strong);
+  background: var(--surface-soft);
+}
+
 .danger-action {
-  border-color: #5c3434;
   color: var(--danger);
 }
 
@@ -1080,8 +1170,7 @@ select:focus {
   .topbar .primary-button,
   .workflow-picker,
   .upload-zone,
-  .favorite-workflow-select,
-  .saved-workflow-action,
+  .favorite-workflow-picker,
   .topbar-actions,
   .topbar .segmented-control {
     width: 100%;

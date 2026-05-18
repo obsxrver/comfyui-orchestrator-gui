@@ -69,11 +69,13 @@
               <input id="workflowFile" type="file" accept=".json,application/json,image/*,video/*,.png,.webp,.jpg,.jpeg,.mp4,.webm,.mov,.mkv,.avi" />
               <span>Upload JSON, photo, or video</span>
             </label>
-            <select id="favoriteWorkflowSelect" class="favorite-workflow-select" aria-label="Saved workflows">
-              <option value="">Saved workflows</option>
-            </select>
-            <button id="renameFavoriteWorkflow" class="ghost-button saved-workflow-action" type="button" disabled>Rename</button>
-            <button id="deleteFavoriteWorkflow" class="ghost-button saved-workflow-action danger-action" type="button" disabled>Delete</button>
+            <div id="favoriteWorkflowPicker" class="favorite-workflow-picker">
+              <button id="favoriteWorkflowMenuButton" class="favorite-workflow-menu-button" type="button" aria-haspopup="listbox" aria-expanded="false" disabled>
+                <span id="favoriteWorkflowMenuLabel">Saved workflows</span>
+                <span class="menu-caret" aria-hidden="true">v</span>
+              </button>
+              <div id="favoriteWorkflowMenu" class="favorite-workflow-menu" role="listbox" aria-label="Saved workflows" hidden></div>
+            </div>
           </div>
           <div class="topbar-actions">
             <div class="segmented-control" aria-label="Workspace layout">

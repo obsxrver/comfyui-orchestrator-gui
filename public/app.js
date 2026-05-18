@@ -3,9 +3,10 @@ const els = {
   workflowDropTitle: document.querySelector("#workflowDropTitle"),
   workflowDropHint: document.querySelector("#workflowDropHint"),
   workflowFile: document.querySelector("#workflowFile"),
-  favoriteWorkflowSelect: document.querySelector("#favoriteWorkflowSelect"),
-  renameFavoriteWorkflow: document.querySelector("#renameFavoriteWorkflow"),
-  deleteFavoriteWorkflow: document.querySelector("#deleteFavoriteWorkflow"),
+  favoriteWorkflowPicker: document.querySelector("#favoriteWorkflowPicker"),
+  favoriteWorkflowMenuButton: document.querySelector("#favoriteWorkflowMenuButton"),
+  favoriteWorkflowMenuLabel: document.querySelector("#favoriteWorkflowMenuLabel"),
+  favoriteWorkflowMenu: document.querySelector("#favoriteWorkflowMenu"),
   favoriteWorkflow: document.querySelector("#favoriteWorkflow"),
   inputList: document.querySelector("#inputList"),
   inputFilter: document.querySelector("#inputFilter"),
@@ -53,6 +54,8 @@ const state = {
   workflow: null,
   workflowSourceName: "",
   activeWorkflowFavoriteId: "",
+  selectedFavoriteWorkflowId: "",
+  favoriteWorkflowMenuOpen: false,
   favoriteWorkflows: readFavoriteWorkflows(),
   inputs: [],
   selectedInputs: new Map(),
@@ -164,39 +167,52 @@ function uniqueFavoriteName(name, excludeId = "") {
 }
 
 function renderFavoriteWorkflows() {
-  if (!els.favoriteWorkflowSelect) return;
-  const currentValue = els.favoriteWorkflowSelect.value;
-  els.favoriteWorkflowSelect.innerHTML = `<option value="">Saved workflows</option>`;
-  for (const favorite of state.favoriteWorkflows) {
-    const option = document.createElement("option");
-    option.value = favorite.id;
-    option.textContent = favorite.name;
-    els.favoriteWorkflowSelect.append(option);
-  }
-  els.favoriteWorkflowSelect.disabled = state.favoriteWorkflows.length === 0;
-  els.favoriteWorkflowSelect.value = state.favoriteWorkflows.some((favorite) => favorite.id === currentValue)
-    ? currentValue
+  if (!els.favoriteWorkflowMenu) return;
+  const currentValue = state.favoriteWorkflows.some((favorite) => favorite.id === state.selectedFavoriteWorkflowId)
+    ? state.selectedFavoriteWorkflowId
     : "";
+  state.selectedFavoriteWorkflowId = currentValue;
+  els.favoriteWorkflowMenu.innerHTML = "";
+  for (const favorite of state.favoriteWorkflows) {
+    const row = document.createElement("div");
+    row.className = "favorite-workflow-row";
+    row.dataset.favoriteId = favorite.id;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(favorite.id === currentValue));
+    row.innerHTML = `
+      <button class="favorite-workflow-load" type="button" title="Use workflow" data-action="load">
+        <span>${escapeHtml(favorite.name)}</span>
+      </button>
+      <button class="favorite-workflow-icon" type="button" title="Rename workflow" aria-label="Rename ${escapeHtml(favorite.name)}" data-action="rename">
+        ${iconSvg("pencil")}
+      </button>
+      <button class="favorite-workflow-icon danger-action" type="button" title="Delete workflow" aria-label="Delete ${escapeHtml(favorite.name)}" data-action="delete">
+        ${iconSvg("trash")}
+      </button>
+    `;
+    els.favoriteWorkflowMenu.append(row);
+  }
+  const selectedFavorite = state.favoriteWorkflows.find((favorite) => favorite.id === currentValue);
+  if (els.favoriteWorkflowMenuButton) {
+    els.favoriteWorkflowMenuButton.disabled = state.favoriteWorkflows.length === 0;
+    els.favoriteWorkflowMenuButton.classList.toggle("has-selection", Boolean(selectedFavorite));
+  }
+  if (els.favoriteWorkflowMenuLabel) {
+    els.favoriteWorkflowMenuLabel.textContent = selectedFavorite?.name || "Saved workflows";
+  }
+  setFavoriteWorkflowMenuOpen(state.favoriteWorkflowMenuOpen && state.favoriteWorkflows.length > 0);
   updateFavoriteControls();
 }
 
 function updateFavoriteControls() {
   state.activeWorkflowFavoriteId = state.workflow ? favoriteIdForWorkflow(state.workflow) : "";
   const isFavorite = state.favoriteWorkflows.some((favorite) => favorite.id === state.activeWorkflowFavoriteId);
-  const selectedFavoriteId = els.favoriteWorkflowSelect?.value || "";
-  const hasSelectedFavorite = state.favoriteWorkflows.some((favorite) => favorite.id === selectedFavoriteId);
   if (els.favoriteWorkflow) {
     els.favoriteWorkflow.disabled = !state.workflow;
     els.favoriteWorkflow.classList.toggle("is-favorite", isFavorite);
     els.favoriteWorkflow.textContent = isFavorite ? "\u2605" : "\u2606";
     els.favoriteWorkflow.title = isFavorite ? "Rename this favorite workflow" : "Add current workflow to favorites";
     els.favoriteWorkflow.setAttribute("aria-label", els.favoriteWorkflow.title);
-  }
-  if (els.renameFavoriteWorkflow) {
-    els.renameFavoriteWorkflow.disabled = !hasSelectedFavorite;
-  }
-  if (els.deleteFavoriteWorkflow) {
-    els.deleteFavoriteWorkflow.disabled = !hasSelectedFavorite;
   }
 }
 
@@ -256,6 +272,7 @@ function saveCurrentWorkflowFavorite() {
 
   try {
     writeFavoriteWorkflows();
+    state.selectedFavoriteWorkflowId = favorite.id;
     renderFavoriteWorkflows();
     updateFavoriteControls();
   } catch (error) {
@@ -268,12 +285,13 @@ function loadFavoriteWorkflow(favoriteId) {
   if (!favorite) return;
   loadWorkflow(structuredClone(favorite.workflow), favorite.name);
   setPanelVisibility("inputs", true);
-  els.favoriteWorkflowSelect.value = favorite.id;
+  state.selectedFavoriteWorkflowId = favorite.id;
+  setFavoriteWorkflowMenuOpen(false);
+  renderFavoriteWorkflows();
   updateFavoriteControls();
 }
 
-function renameSelectedFavoriteWorkflow() {
-  const favoriteId = els.favoriteWorkflowSelect?.value || "";
+function renameFavoriteWorkflow(favoriteId) {
   const favorite = state.favoriteWorkflows.find((item) => item.id === favoriteId);
   if (!favorite) return;
   const name = window.prompt("Saved workflow name", favorite.name);
@@ -288,7 +306,6 @@ function renameSelectedFavoriteWorkflow() {
   try {
     writeFavoriteWorkflows();
     renderFavoriteWorkflows();
-    els.favoriteWorkflowSelect.value = favorite.id;
     if (state.activeWorkflowFavoriteId === favorite.id) state.workflowSourceName = favorite.name;
     updateFavoriteControls();
   } catch (error) {
@@ -296,8 +313,7 @@ function renameSelectedFavoriteWorkflow() {
   }
 }
 
-function deleteSelectedFavoriteWorkflow() {
-  const favoriteId = els.favoriteWorkflowSelect?.value || "";
+function deleteFavoriteWorkflow(favoriteId) {
   const favorite = state.favoriteWorkflows.find((item) => item.id === favoriteId);
   if (!favorite) return;
   if (!window.confirm(`Delete "${favorite.name}" from saved workflows?`)) return;
@@ -305,12 +321,27 @@ function deleteSelectedFavoriteWorkflow() {
   state.favoriteWorkflows = state.favoriteWorkflows.filter((item) => item.id !== favorite.id);
   try {
     writeFavoriteWorkflows();
-    els.favoriteWorkflowSelect.value = "";
+    if (state.selectedFavoriteWorkflowId === favorite.id) state.selectedFavoriteWorkflowId = "";
     renderFavoriteWorkflows();
     updateFavoriteControls();
   } catch (error) {
     alert(`Workflow could not be deleted: ${error.message}`);
   }
+}
+
+function setFavoriteWorkflowMenuOpen(open) {
+  state.favoriteWorkflowMenuOpen = open;
+  if (els.favoriteWorkflowMenu) els.favoriteWorkflowMenu.hidden = !open;
+  if (els.favoriteWorkflowMenuButton) {
+    els.favoriteWorkflowMenuButton.setAttribute("aria-expanded", String(open));
+  }
+}
+
+function iconSvg(name) {
+  if (name === "trash") {
+    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>`;
+  }
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="M13 6l5 5"/></svg>`;
 }
 
 function isLinkValue(value) {
@@ -2218,12 +2249,25 @@ els.workflowFile.addEventListener("change", async () => {
   const file = els.workflowFile.files[0];
   loadWorkflowFile(file);
 });
-els.favoriteWorkflowSelect.addEventListener("change", () => {
-  loadFavoriteWorkflow(els.favoriteWorkflowSelect.value);
-  updateFavoriteControls();
+els.favoriteWorkflowMenuButton.addEventListener("click", () => {
+  setFavoriteWorkflowMenuOpen(!state.favoriteWorkflowMenuOpen);
 });
-els.renameFavoriteWorkflow.addEventListener("click", renameSelectedFavoriteWorkflow);
-els.deleteFavoriteWorkflow.addEventListener("click", deleteSelectedFavoriteWorkflow);
+els.favoriteWorkflowMenu.addEventListener("click", (event) => {
+  const row = event.target.closest(".favorite-workflow-row");
+  const action = event.target.closest("[data-action]")?.dataset.action;
+  if (!row || !action) return;
+  if (action === "load") loadFavoriteWorkflow(row.dataset.favoriteId);
+  if (action === "rename") renameFavoriteWorkflow(row.dataset.favoriteId);
+  if (action === "delete") deleteFavoriteWorkflow(row.dataset.favoriteId);
+});
+document.addEventListener("click", (event) => {
+  if (!state.favoriteWorkflowMenuOpen) return;
+  if (els.favoriteWorkflowPicker?.contains(event.target)) return;
+  setFavoriteWorkflowMenuOpen(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") setFavoriteWorkflowMenuOpen(false);
+});
 els.favoriteWorkflow.addEventListener("click", saveCurrentWorkflowFavorite);
 
 els.inputFilter.addEventListener("input", renderInputs);
