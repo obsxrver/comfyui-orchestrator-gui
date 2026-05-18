@@ -335,6 +335,17 @@ select:focus {
   font-weight: 700;
 }
 
+.saved-workflow-action {
+  min-height: 44px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.danger-action {
+  border-color: #5c3434;
+  color: var(--danger);
+}
+
 .upload-zone input {
   display: none;
 }
@@ -1060,10 +1071,16 @@ select:focus {
   .workflow-picker,
   .upload-zone,
   .favorite-workflow-select,
+  .saved-workflow-action,
   .topbar-actions,
   .topbar .segmented-control {
     width: 100%;
     justify-content: center;
+  }
+
+  .workflow-picker {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .topbar-actions {

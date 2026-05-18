@@ -4,6 +4,8 @@ const els = {
   workflowDropHint: document.querySelector("#workflowDropHint"),
   workflowFile: document.querySelector("#workflowFile"),
   favoriteWorkflowSelect: document.querySelector("#favoriteWorkflowSelect"),
+  renameFavoriteWorkflow: document.querySelector("#renameFavoriteWorkflow"),
+  deleteFavoriteWorkflow: document.querySelector("#deleteFavoriteWorkflow"),
   favoriteWorkflow: document.querySelector("#favoriteWorkflow"),
   inputList: document.querySelector("#inputList"),
   inputFilter: document.querySelector("#inputFilter"),
@@ -134,6 +136,29 @@ function compareFavoritesByName(left, right) {
   return left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true });
 }
 
+function normalizeFavoriteName(name) {
+  return String(name || "").trim() || "Untitled workflow";
+}
+
+function favoriteNameExists(name, excludeId = "") {
+  const normalized = name.toLocaleLowerCase();
+  return state.favoriteWorkflows.some(
+    (favorite) => favorite.id !== excludeId && favorite.name.toLocaleLowerCase() === normalized
+  );
+}
+
+function uniqueFavoriteName(name, excludeId = "") {
+  const baseName = normalizeFavoriteName(name);
+  if (!favoriteNameExists(baseName, excludeId)) return baseName;
+  let copyIndex = 2;
+  let candidate = `${baseName} (${copyIndex})`;
+  while (favoriteNameExists(candidate, excludeId)) {
+    copyIndex += 1;
+    candidate = `${baseName} (${copyIndex})`;
+  }
+  return candidate;
+}
+
 function renderFavoriteWorkflows() {
   if (!els.favoriteWorkflowSelect) return;
   const currentValue = els.favoriteWorkflowSelect.value;
@@ -148,17 +173,26 @@ function renderFavoriteWorkflows() {
   els.favoriteWorkflowSelect.value = state.favoriteWorkflows.some((favorite) => favorite.id === currentValue)
     ? currentValue
     : "";
+  updateFavoriteControls();
 }
 
 function updateFavoriteControls() {
   state.activeWorkflowFavoriteId = state.workflow ? favoriteIdForWorkflow(state.workflow) : "";
   const isFavorite = state.favoriteWorkflows.some((favorite) => favorite.id === state.activeWorkflowFavoriteId);
+  const selectedFavoriteId = els.favoriteWorkflowSelect?.value || "";
+  const hasSelectedFavorite = state.favoriteWorkflows.some((favorite) => favorite.id === selectedFavoriteId);
   if (els.favoriteWorkflow) {
     els.favoriteWorkflow.disabled = !state.workflow;
     els.favoriteWorkflow.classList.toggle("is-favorite", isFavorite);
     els.favoriteWorkflow.textContent = isFavorite ? "\u2605" : "\u2606";
     els.favoriteWorkflow.title = isFavorite ? "Rename this favorite workflow" : "Add current workflow to favorites";
     els.favoriteWorkflow.setAttribute("aria-label", els.favoriteWorkflow.title);
+  }
+  if (els.renameFavoriteWorkflow) {
+    els.renameFavoriteWorkflow.disabled = !hasSelectedFavorite;
+  }
+  if (els.deleteFavoriteWorkflow) {
+    els.deleteFavoriteWorkflow.disabled = !hasSelectedFavorite;
   }
 }
 
@@ -201,11 +235,12 @@ function saveCurrentWorkflowFavorite() {
 
   const trimmedName = name.trim();
   if (!trimmedName) return;
+  const finalName = uniqueFavoriteName(trimmedName, existing?.id || "");
 
   const now = new Date().toISOString();
   const favorite = {
     id,
-    name: trimmedName,
+    name: finalName,
     workflow: structuredClone(state.workflow),
     createdAt: existing?.createdAt || now,
     updatedAt: now,
@@ -229,7 +264,49 @@ function loadFavoriteWorkflow(favoriteId) {
   if (!favorite) return;
   loadWorkflow(structuredClone(favorite.workflow), favorite.name);
   setPanelVisibility("inputs", true);
-  els.favoriteWorkflowSelect.value = "";
+  els.favoriteWorkflowSelect.value = favorite.id;
+  updateFavoriteControls();
+}
+
+function renameSelectedFavoriteWorkflow() {
+  const favoriteId = els.favoriteWorkflowSelect?.value || "";
+  const favorite = state.favoriteWorkflows.find((item) => item.id === favoriteId);
+  if (!favorite) return;
+  const name = window.prompt("Saved workflow name", favorite.name);
+  if (name === null) return;
+
+  const trimmedName = name.trim();
+  if (!trimmedName) return;
+  favorite.name = uniqueFavoriteName(trimmedName, favorite.id);
+  favorite.updatedAt = new Date().toISOString();
+  state.favoriteWorkflows = [...state.favoriteWorkflows].sort(compareFavoritesByName);
+
+  try {
+    writeFavoriteWorkflows();
+    renderFavoriteWorkflows();
+    els.favoriteWorkflowSelect.value = favorite.id;
+    if (state.activeWorkflowFavoriteId === favorite.id) state.workflowSourceName = favorite.name;
+    updateFavoriteControls();
+  } catch (error) {
+    alert(`Workflow could not be renamed: ${error.message}`);
+  }
+}
+
+function deleteSelectedFavoriteWorkflow() {
+  const favoriteId = els.favoriteWorkflowSelect?.value || "";
+  const favorite = state.favoriteWorkflows.find((item) => item.id === favoriteId);
+  if (!favorite) return;
+  if (!window.confirm(`Delete "${favorite.name}" from saved workflows?`)) return;
+
+  state.favoriteWorkflows = state.favoriteWorkflows.filter((item) => item.id !== favorite.id);
+  try {
+    writeFavoriteWorkflows();
+    els.favoriteWorkflowSelect.value = "";
+    renderFavoriteWorkflows();
+    updateFavoriteControls();
+  } catch (error) {
+    alert(`Workflow could not be deleted: ${error.message}`);
+  }
 }
 
 function isLinkValue(value) {
@@ -2120,7 +2197,10 @@ els.workflowFile.addEventListener("change", async () => {
 });
 els.favoriteWorkflowSelect.addEventListener("change", () => {
   loadFavoriteWorkflow(els.favoriteWorkflowSelect.value);
+  updateFavoriteControls();
 });
+els.renameFavoriteWorkflow.addEventListener("click", renameSelectedFavoriteWorkflow);
+els.deleteFavoriteWorkflow.addEventListener("click", deleteSelectedFavoriteWorkflow);
 els.favoriteWorkflow.addEventListener("click", saveCurrentWorkflowFavorite);
 
 els.inputFilter.addEventListener("input", renderInputs);
