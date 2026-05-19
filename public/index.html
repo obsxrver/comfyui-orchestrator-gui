@@ -90,8 +90,15 @@
           <div class="panel workflow-panel">
             <div class="panel-heading">
               <div class="input-heading">
-                <h2>Workflow Inputs</h2>
-                <button id="favoriteWorkflow" class="favorite-workflow-button" type="button" title="Add current workflow to favorites" aria-label="Add current workflow to favorites" disabled>&#9734;</button>
+                <h2><span id="workflowTitle">Workflow Inputs</span><span id="workflowUnsavedMarker" class="unsaved-marker" title="Unsaved workflow" hidden>*</span></h2>
+                <div id="workflowFileMenuWrap" class="workflow-file-menu-wrap">
+                  <button id="workflowFileMenuButton" class="ghost-button file-menu-button" type="button" aria-haspopup="menu" aria-expanded="false" disabled>File</button>
+                  <div id="workflowFileMenu" class="workflow-file-menu" role="menu" hidden>
+                    <button id="saveWorkflow" type="button" role="menuitem">Save</button>
+                    <button id="saveWorkflowAs" type="button" role="menuitem">Save as</button>
+                    <button id="exportWorkflowJson" type="button" role="menuitem">Export to .json</button>
+                  </div>
+                </div>
               </div>
               <div class="input-tools">
                 <button id="showHiddenInputs" class="ghost-button" type="button" hidden>Unhide all</button>

@@ -523,30 +523,63 @@ select:focus {
 }
 
 .input-heading {
-  display: flex;
-  align-items: center;
+  display: grid;
   gap: 8px;
   min-width: 0;
 }
 
-.favorite-workflow-button {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  min-height: 34px;
-  border: 1px solid var(--line-strong);
-  border-radius: 7px;
-  padding: 0;
-  background: var(--surface-soft);
-  color: var(--muted);
-  font-size: 21px;
-  line-height: 1;
+.input-heading h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.favorite-workflow-button.is-favorite {
-  border-color: var(--warning);
-  background: #302414;
-  color: #ffd083;
+.unsaved-marker {
+  margin-left: 4px;
+  color: var(--warning);
+}
+
+.workflow-file-menu-wrap {
+  position: relative;
+  width: max-content;
+}
+
+.file-menu-button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.workflow-file-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 35;
+  display: grid;
+  gap: 4px;
+  min-width: 150px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 6px;
+  background: #101319;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.34);
+}
+
+.workflow-file-menu button {
+  min-height: 32px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 0 9px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.workflow-file-menu button:hover,
+.workflow-file-menu button:focus-visible {
+  border-color: var(--line-strong);
+  background: var(--surface-soft);
 }
 
 .empty-state {

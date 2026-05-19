@@ -7,7 +7,14 @@ const els = {
   favoriteWorkflowMenuButton: document.querySelector("#favoriteWorkflowMenuButton"),
   favoriteWorkflowMenuLabel: document.querySelector("#favoriteWorkflowMenuLabel"),
   favoriteWorkflowMenu: document.querySelector("#favoriteWorkflowMenu"),
-  favoriteWorkflow: document.querySelector("#favoriteWorkflow"),
+  workflowTitle: document.querySelector("#workflowTitle"),
+  workflowUnsavedMarker: document.querySelector("#workflowUnsavedMarker"),
+  workflowFileMenuWrap: document.querySelector("#workflowFileMenuWrap"),
+  workflowFileMenuButton: document.querySelector("#workflowFileMenuButton"),
+  workflowFileMenu: document.querySelector("#workflowFileMenu"),
+  saveWorkflow: document.querySelector("#saveWorkflow"),
+  saveWorkflowAs: document.querySelector("#saveWorkflowAs"),
+  exportWorkflowJson: document.querySelector("#exportWorkflowJson"),
   inputList: document.querySelector("#inputList"),
   inputFilter: document.querySelector("#inputFilter"),
   showHiddenInputs: document.querySelector("#showHiddenInputs"),
@@ -56,6 +63,7 @@ const state = {
   activeWorkflowFavoriteId: "",
   selectedFavoriteWorkflowId: "",
   favoriteWorkflowMenuOpen: false,
+  workflowFileMenuOpen: false,
   favoriteWorkflows: readFavoriteWorkflows(),
   inputs: [],
   selectedInputs: new Map(),
@@ -205,14 +213,17 @@ function renderFavoriteWorkflows() {
 }
 
 function updateFavoriteControls() {
+  const favorite = currentWorkflowFavorite();
   state.activeWorkflowFavoriteId = state.workflow ? favoriteIdForWorkflow(state.workflow) : "";
-  const isFavorite = state.favoriteWorkflows.some((favorite) => favorite.id === state.activeWorkflowFavoriteId);
-  if (els.favoriteWorkflow) {
-    els.favoriteWorkflow.disabled = !state.workflow;
-    els.favoriteWorkflow.classList.toggle("is-favorite", isFavorite);
-    els.favoriteWorkflow.textContent = isFavorite ? "\u2605" : "\u2606";
-    els.favoriteWorkflow.title = isFavorite ? "Rename this favorite workflow" : "Add current workflow to favorites";
-    els.favoriteWorkflow.setAttribute("aria-label", els.favoriteWorkflow.title);
+  if (els.workflowTitle) {
+    els.workflowTitle.textContent = currentWorkflowDisplayName(favorite);
+  }
+  if (els.workflowUnsavedMarker) {
+    els.workflowUnsavedMarker.hidden = !state.workflow || Boolean(favorite);
+  }
+  if (els.workflowFileMenuButton) {
+    els.workflowFileMenuButton.disabled = !state.workflow;
+    if (!state.workflow) setWorkflowFileMenuOpen(false);
   }
 }
 
@@ -243,14 +254,26 @@ function defaultFavoriteWorkflowName() {
   return `Workflow ${new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
 }
 
-function saveCurrentWorkflowFavorite() {
+function currentWorkflowFavorite() {
+  if (!state.workflow) return null;
+  const id = favoriteIdForWorkflow(state.workflow);
+  return state.favoriteWorkflows.find((favorite) => favorite.id === id) || null;
+}
+
+function currentWorkflowDisplayName(favorite = currentWorkflowFavorite()) {
+  if (!state.workflow) return "Workflow Inputs";
+  if (favorite?.name) return favorite.name;
+  const sourceBase = (state.workflowSourceName || "").replace(/\.[a-z0-9]+$/i, "").trim();
+  return sourceBase || "Untitled workflow";
+}
+
+function saveCurrentWorkflowFavorite({ promptForName = false } = {}) {
   if (!state.workflow) return;
   const id = favoriteIdForWorkflow(state.workflow);
   const existing = state.favoriteWorkflows.find((favorite) => favorite.id === id);
-  const name = window.prompt(
-    existing ? "Favorite workflow name" : "Save workflow as",
-    existing?.name || defaultFavoriteWorkflowName()
-  );
+  const name = promptForName
+    ? window.prompt("Save workflow as", existing?.name || currentWorkflowDisplayName() || defaultFavoriteWorkflowName())
+    : existing?.name || currentWorkflowDisplayName() || defaultFavoriteWorkflowName();
   if (name === null) return;
 
   const trimmedName = name.trim();
@@ -274,6 +297,7 @@ function saveCurrentWorkflowFavorite() {
     writeFavoriteWorkflows();
     state.selectedFavoriteWorkflowId = favorite.id;
     renderFavoriteWorkflows();
+    setWorkflowFileMenuOpen(false);
     updateFavoriteControls();
   } catch (error) {
     alert(`Workflow could not be saved: ${error.message}`);
@@ -330,11 +354,45 @@ function deleteFavoriteWorkflow(favoriteId) {
 }
 
 function setFavoriteWorkflowMenuOpen(open) {
+  if (open) setWorkflowFileMenuOpen(false);
   state.favoriteWorkflowMenuOpen = open;
   if (els.favoriteWorkflowMenu) els.favoriteWorkflowMenu.hidden = !open;
   if (els.favoriteWorkflowMenuButton) {
     els.favoriteWorkflowMenuButton.setAttribute("aria-expanded", String(open));
   }
+}
+
+function setWorkflowFileMenuOpen(open) {
+  if (open) setFavoriteWorkflowMenuOpen(false);
+  state.workflowFileMenuOpen = open;
+  if (els.workflowFileMenu) els.workflowFileMenu.hidden = !open;
+  if (els.workflowFileMenuButton) {
+    els.workflowFileMenuButton.setAttribute("aria-expanded", String(open));
+  }
+}
+
+function exportCurrentWorkflowJson() {
+  if (!state.workflow) return;
+  const filename = `${safeFileBaseName(currentWorkflowDisplayName())}.json`;
+  const blob = new Blob([`${JSON.stringify(state.workflow, null, 2)}\n`], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+  setWorkflowFileMenuOpen(false);
+}
+
+function safeFileBaseName(value) {
+  return String(value || "workflow")
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[<>:"/\\|?*\x00-\x1F]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+$/, "workflow")
+    .slice(0, 120) || "workflow";
 }
 
 function iconSvg(name) {
@@ -1849,8 +1907,10 @@ function loadWorkflow(workflow, sourceName = "") {
   state.workflow = workflow;
   state.workflowSourceName = sourceName;
   state.inputs = extractInputs(state.workflow);
+  state.selectedFavoriteWorkflowId = currentWorkflowFavorite()?.id || "";
   state.selectedInputs.clear();
   state.hiddenInputIds.clear();
+  renderFavoriteWorkflows();
   renderInputs();
   updateVariantCount();
   updateSubmitState();
@@ -2266,9 +2326,22 @@ document.addEventListener("click", (event) => {
   setFavoriteWorkflowMenuOpen(false);
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") setFavoriteWorkflowMenuOpen(false);
+  if (event.key === "Escape") {
+    setFavoriteWorkflowMenuOpen(false);
+    setWorkflowFileMenuOpen(false);
+  }
 });
-els.favoriteWorkflow.addEventListener("click", saveCurrentWorkflowFavorite);
+els.workflowFileMenuButton.addEventListener("click", () => {
+  setWorkflowFileMenuOpen(!state.workflowFileMenuOpen);
+});
+els.saveWorkflow.addEventListener("click", () => saveCurrentWorkflowFavorite());
+els.saveWorkflowAs.addEventListener("click", () => saveCurrentWorkflowFavorite({ promptForName: true }));
+els.exportWorkflowJson.addEventListener("click", exportCurrentWorkflowJson);
+document.addEventListener("click", (event) => {
+  if (!state.workflowFileMenuOpen) return;
+  if (els.workflowFileMenuWrap?.contains(event.target)) return;
+  setWorkflowFileMenuOpen(false);
+});
 
 els.inputFilter.addEventListener("input", renderInputs);
 els.showHiddenInputs.addEventListener("click", () => {
