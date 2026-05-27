@@ -904,34 +904,57 @@ function queueItemsContainPrompt(queueItems, promptId) {
   });
 }
 
-async function cancelJob(job) {
-  const backend = getBackend(job.backendId);
-  if (!backend) throw new Error("Backend no longer exists");
-  if (!job.promptId) throw new Error("Job does not have a ComfyUI prompt id");
-
-  const queue = await getComfyJson(backend, "/queue");
-  const wasRunning = queueItemsContainPrompt(queue.queue_running, job.promptId);
-  const wasPending = queueItemsContainPrompt(queue.queue_pending, job.promptId);
-
-  await comfyFetch(backend, "/queue", {
-    method: "POST",
-    body: JSON.stringify({ delete: [job.promptId] }),
-  });
-
-  if (wasRunning) {
-    await comfyFetch(backend, "/interrupt", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-  }
-
+function markJobCanceled(job) {
   job.status = "canceled";
   job.error = "";
   job.canceledAt = new Date().toISOString();
-  if (state.activePromptByBackend.get(backend.id) === job.promptId) {
-    state.activePromptByBackend.delete(backend.id);
+  if (state.activePromptByBackend.get(job.backendId) === job.promptId) {
+    state.activePromptByBackend.delete(job.backendId);
   }
-  return { job, wasRunning, wasPending };
+}
+
+async function cancelJob(job) {
+  const backend = getBackend(job.backendId);
+  if (!job.promptId) throw new Error("Job does not have a ComfyUI prompt id");
+  if (!backend) {
+    markJobCanceled(job);
+    return { job, wasRunning: false, wasPending: false, localOnly: true, warning: "Backend no longer exists" };
+  }
+
+  let queue;
+  try {
+    queue = await getComfyJson(backend, "/queue");
+  } catch (error) {
+    markJobCanceled(job);
+    return { job, wasRunning: false, wasPending: false, localOnly: true, warning: error.message };
+  }
+  const wasRunning = queueItemsContainPrompt(queue.queue_running, job.promptId);
+  const wasPending = queueItemsContainPrompt(queue.queue_pending, job.promptId);
+
+  try {
+    await comfyFetch(backend, "/queue", {
+      method: "POST",
+      body: JSON.stringify({ delete: [job.promptId] }),
+    });
+  } catch (error) {
+    markJobCanceled(job);
+    return { job, wasRunning, wasPending, localOnly: true, warning: error.message };
+  }
+
+  let warning = "";
+  if (wasRunning) {
+    try {
+      await comfyFetch(backend, "/interrupt", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+    } catch (error) {
+      warning = error.message;
+    }
+  }
+
+  markJobCanceled(job);
+  return { job, wasRunning, wasPending, warning };
 }
 
 async function handleApi(req, res, url) {
@@ -1016,10 +1039,9 @@ async function handleApi(req, res, url) {
     const variants = buildVariants(workflow, selections);
     const workflowNodes = summarizeWorkflowNodes(workflow);
     const backendLoads = await getBackendLoads(backends);
-    const selectedBackend = chooseLeastBusyBackend(backends, backendLoads);
     const created = [];
     for (let index = 0; index < variants.length; index += 1) {
-      const backend = selectedBackend;
+      const backend = chooseLeastBusyBackend(backends, backendLoads);
       const variant = variants[index];
 
       try {

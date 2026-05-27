@@ -132,6 +132,7 @@ function readFavoriteWorkflows() {
       .filter((item) => item && typeof item === "object" && isComfyApiWorkflow(item.workflow))
       .map((item) => ({
         id: item.id || favoriteIdForWorkflow(item.workflow),
+        signature: item.signature || favoriteIdForWorkflow(item.workflow),
         name: String(item.name || "Untitled workflow").trim() || "Untitled workflow",
         workflow: item.workflow,
         createdAt: item.createdAt || new Date().toISOString(),
@@ -174,6 +175,10 @@ function uniqueFavoriteName(name, excludeId = "") {
   return candidate;
 }
 
+function makeFavoriteWorkflowId() {
+  return `favorite-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function renderFavoriteWorkflows() {
   if (!els.favoriteWorkflowMenu) return;
   const currentValue = state.favoriteWorkflows.some((favorite) => favorite.id === state.selectedFavoriteWorkflowId)
@@ -214,12 +219,13 @@ function renderFavoriteWorkflows() {
 
 function updateFavoriteControls() {
   const favorite = currentWorkflowFavorite();
-  state.activeWorkflowFavoriteId = state.workflow ? favoriteIdForWorkflow(state.workflow) : "";
+  const isSaved = Boolean(currentSavedWorkflowMatch());
+  state.activeWorkflowFavoriteId = state.workflow ? workflowSignature(currentWorkflowForSave()) : "";
   if (els.workflowTitle) {
     els.workflowTitle.textContent = currentWorkflowDisplayName(favorite);
   }
   if (els.workflowUnsavedMarker) {
-    els.workflowUnsavedMarker.hidden = !state.workflow || Boolean(favorite);
+    els.workflowUnsavedMarker.hidden = !state.workflow || isSaved;
   }
   if (els.workflowFileMenuButton) {
     els.workflowFileMenuButton.disabled = !state.workflow;
@@ -228,6 +234,10 @@ function updateFavoriteControls() {
 }
 
 function favoriteIdForWorkflow(workflow) {
+  return workflowSignature(workflow);
+}
+
+function workflowSignature(workflow) {
   const serialized = stableStringify(workflow);
   return `workflow-${hashString(serialized)}-${serialized.length.toString(36)}`;
 }
@@ -255,24 +265,32 @@ function defaultFavoriteWorkflowName() {
 }
 
 function currentWorkflowFavorite() {
+  return state.favoriteWorkflows.find((favorite) => favorite.id === state.selectedFavoriteWorkflowId) || null;
+}
+
+function currentSavedWorkflowMatch() {
   if (!state.workflow) return null;
-  const id = favoriteIdForWorkflow(state.workflow);
-  return state.favoriteWorkflows.find((favorite) => favorite.id === id) || null;
+  const signature = workflowSignature(currentWorkflowForSave());
+  return state.favoriteWorkflows.find((favorite) => (favorite.signature || workflowSignature(favorite.workflow)) === signature) || null;
 }
 
 function currentWorkflowDisplayName(favorite = currentWorkflowFavorite()) {
   if (!state.workflow) return "Workflow Inputs";
   if (favorite?.name) return favorite.name;
+  const savedMatch = currentSavedWorkflowMatch();
+  if (savedMatch?.name) return savedMatch.name;
   const sourceBase = (state.workflowSourceName || "").replace(/\.[a-z0-9]+$/i, "").trim();
   return sourceBase || "Untitled workflow";
 }
 
-function saveCurrentWorkflowFavorite({ promptForName = false } = {}) {
+function saveCurrentWorkflowFavorite({ saveAs = false } = {}) {
   if (!state.workflow) return;
-  const id = favoriteIdForWorkflow(state.workflow);
-  const existing = state.favoriteWorkflows.find((favorite) => favorite.id === id);
-  const name = promptForName
-    ? window.prompt("Save workflow as", existing?.name || currentWorkflowDisplayName() || defaultFavoriteWorkflowName())
+  const existing = saveAs ? null : currentWorkflowFavorite() || currentSavedWorkflowMatch();
+  const workflow = currentWorkflowForSave();
+  const signature = workflowSignature(workflow);
+  const id = existing?.id || makeFavoriteWorkflowId();
+  const name = saveAs
+    ? window.prompt("Save workflow as", currentWorkflowDisplayName() || defaultFavoriteWorkflowName())
     : existing?.name || currentWorkflowDisplayName() || defaultFavoriteWorkflowName();
   if (name === null) return;
 
@@ -283,8 +301,9 @@ function saveCurrentWorkflowFavorite({ promptForName = false } = {}) {
   const now = new Date().toISOString();
   const favorite = {
     id,
+    signature,
     name: finalName,
-    workflow: structuredClone(state.workflow),
+    workflow,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
@@ -295,13 +314,43 @@ function saveCurrentWorkflowFavorite({ promptForName = false } = {}) {
 
   try {
     writeFavoriteWorkflows();
+    state.workflow = structuredClone(workflow);
+    state.workflowSourceName = finalName;
+    state.inputs = extractInputs(state.workflow);
+    state.selectedInputs.clear();
     state.selectedFavoriteWorkflowId = favorite.id;
     renderFavoriteWorkflows();
+    renderInputs();
     setWorkflowFileMenuOpen(false);
     updateFavoriteControls();
   } catch (error) {
     alert(`Workflow could not be saved: ${error.message}`);
   }
+}
+
+function currentWorkflowForSave() {
+  if (!state.workflow) return null;
+  return applySelectionsToWorkflow(state.workflow, state.selectedInputs.values());
+}
+
+function applySelectionsToWorkflow(workflow, selections) {
+  const prompt = structuredClone(workflow);
+  for (const selection of selections) {
+    const node = prompt?.[selection.nodeId];
+    if (!node?.inputs || !Object.hasOwn(node.inputs, selection.inputName)) continue;
+    const value = firstPersistableSelectionValue(selection);
+    if (value !== undefined) node.inputs[selection.inputName] = value;
+  }
+  return prompt;
+}
+
+function firstPersistableSelectionValue(selection) {
+  const value = (selection.values || []).find(hasUiVariantValue);
+  if (value === undefined) return undefined;
+  if (value instanceof File) return value.name;
+  if (value && typeof value === "object" && value.name) return value.name;
+  if (value && typeof value === "object" && "value" in value) return value.value;
+  return value;
 }
 
 function loadFavoriteWorkflow(favoriteId) {
@@ -374,7 +423,7 @@ function setWorkflowFileMenuOpen(open) {
 function exportCurrentWorkflowJson() {
   if (!state.workflow) return;
   const filename = `${safeFileBaseName(currentWorkflowDisplayName())}.json`;
-  const blob = new Blob([`${JSON.stringify(state.workflow, null, 2)}\n`], { type: "application/json" });
+  const blob = new Blob([`${JSON.stringify(currentWorkflowForSave(), null, 2)}\n`], { type: "application/json" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
   link.download = filename;
@@ -678,6 +727,7 @@ function renderInputs() {
       syncSelectionFromControls(input, valuesInput, imageInput, scalarList, randomizeInt);
       updateVariantCount();
       updateSubmitState();
+      updateFavoriteControls();
     };
 
     valuesInput.addEventListener("input", () => {
@@ -1907,7 +1957,7 @@ function loadWorkflow(workflow, sourceName = "") {
   state.workflow = workflow;
   state.workflowSourceName = sourceName;
   state.inputs = extractInputs(state.workflow);
-  state.selectedFavoriteWorkflowId = currentWorkflowFavorite()?.id || "";
+  state.selectedFavoriteWorkflowId = currentSavedWorkflowMatch()?.id || "";
   state.selectedInputs.clear();
   state.hiddenInputIds.clear();
   renderFavoriteWorkflows();
@@ -2326,6 +2376,12 @@ document.addEventListener("click", (event) => {
   setFavoriteWorkflowMenuOpen(false);
 });
 document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    if (!state.workflow) return;
+    event.preventDefault();
+    saveCurrentWorkflowFavorite();
+    return;
+  }
   if (event.key === "Escape") {
     setFavoriteWorkflowMenuOpen(false);
     setWorkflowFileMenuOpen(false);
@@ -2335,7 +2391,7 @@ els.workflowFileMenuButton.addEventListener("click", () => {
   setWorkflowFileMenuOpen(!state.workflowFileMenuOpen);
 });
 els.saveWorkflow.addEventListener("click", () => saveCurrentWorkflowFavorite());
-els.saveWorkflowAs.addEventListener("click", () => saveCurrentWorkflowFavorite({ promptForName: true }));
+els.saveWorkflowAs.addEventListener("click", () => saveCurrentWorkflowFavorite({ saveAs: true }));
 els.exportWorkflowJson.addEventListener("click", exportCurrentWorkflowJson);
 document.addEventListener("click", (event) => {
   if (!state.workflowFileMenuOpen) return;

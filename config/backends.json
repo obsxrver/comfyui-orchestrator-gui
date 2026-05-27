@@ -1,29 +1,24 @@
 {
   "backends": [
     {
-      "id": "backend-1779127702177",
+      "id": "backend-1779718629583",
       "name": "GPU 1",
       "url": "http://localhost:8189"
     },
     {
-      "id": "backend-1779127704859-cw1i3g9r0o",
+      "id": "backend-1779718632754-fg8s0pscq5b",
       "name": "GPU 2",
       "url": "http://localhost:8190"
     },
     {
-      "id": "backend-1779127704861-v7h6yr39e4m",
+      "id": "backend-1779718633005-4csnikxthcx",
       "name": "GPU 3",
       "url": "http://localhost:8191"
     },
     {
-      "id": "backend-1779127706151-3q6jro2xcol",
+      "id": "backend-1779718633274-dt65o0op9wp",
       "name": "GPU 4",
-      "url": "http://localhost:8192"
-    },
-    {
-      "id": "backend-1779127707348-ewtr5kyd7p",
-      "name": "GPU 5",
-      "url": "http://174.29.13.81:50062"
+      "url": "http://localhost:18188"
     }
   ]
 }
